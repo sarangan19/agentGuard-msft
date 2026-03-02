@@ -1,0 +1,15 @@
+# ── Core ───────────────────────────────────────────────────────
+streamlit>=1.30.0
+python-dotenv>=1.0.0
+plotly>=5.0.0
+
+# ── Azure ──────────────────────────────────────────────────────
+openai>=1.40.0
+azure-cosmos>=4.15.0
+azure-identity>=1.15.0
+azure-keyvault-secrets>=4.10.0
+azure-ai-contentsafety>=1.0.0
+
+# ── Testing ────────────────────────────────────────────────────
+pytest>=7.0.0
+pytest-asyncio>=0.23.0
