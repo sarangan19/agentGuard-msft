@@ -187,6 +187,41 @@ class PrivacyLayer:
         }
 
     # ----------------------------------------------------------
+    def scan_output(self, text: str) -> dict:
+        """
+        Scan agent output / response for PII that shouldn't be exposed.
+
+        The agent receives anonymized text as input, but could still generate
+        responses that contain or reconstruct PII. This method catches that.
+
+        Uses the regex patterns only (fast, no API call) since this is a
+        post-processing safety net, not a primary detection mechanism.
+
+        Returns:
+          {
+            "original_output":  str,
+            "sanitized_output": str,   # PII replaced with [REDACTED]
+            "leaks_found":      int,
+            "leaked_types":     list[str],
+          }
+        """
+        pii_data = _regex_detect_pii(text)
+        leaked = pii_data.get("pii_found", [])
+
+        sanitized = text
+        for item in sorted(leaked, key=lambda x: len(x.get("original", "")), reverse=True):
+            original = item.get("original", "")
+            if original:
+                sanitized = sanitized.replace(original, "[REDACTED]")
+
+        return {
+            "original_output":  text,
+            "sanitized_output": sanitized,
+            "leaks_found":      len(leaked),
+            "leaked_types":     [i.get("type", "UNKNOWN") for i in leaked],
+        }
+
+    # ----------------------------------------------------------
     def de_anonymize(self, text: str, mapping: dict) -> str:
         """
         Restore original values in agent response text.

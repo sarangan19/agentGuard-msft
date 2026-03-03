@@ -20,6 +20,7 @@ Intervention tier mapping:
 import re
 import json
 import logging
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 from azure_services import get_openai_service
@@ -28,33 +29,97 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════
+# INPUT NORMALIZER  (runs before every pre-filter check)
+# ═══════════════════════════════════════════════════════════════
+
+# Leetspeak / character-substitution map.
+# Attackers use these to bypass naive regex: "1gn0r3 @ll pr3v10us"
+_LEET_MAP = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a",
+    "5": "s", "7": "t", "!": "i", "$": "s", "@": "a",
+})
+
+# Zero-width and invisible Unicode characters used to break patterns:
+# zero-width space, zero-width non-joiner, zero-width joiner,
+# BOM, soft hyphen, word joiner, left-to-right mark, right-to-left mark
+_INVISIBLE_CHARS = re.compile(
+    r"[\u200b\u200c\u200d\ufeff\u00ad\u2060\u200e\u200f]"
+)
+
+
+def _normalize_text(text: str) -> str:
+    """
+    Normalize input text to defeat common obfuscation techniques:
+
+    1. NFKD unicode decomposition  — maps lookalike chars (cyrillic о → o, etc.)
+    2. ASCII encoding              — strips remaining non-ASCII after decomposition
+    3. Strip invisible characters  — zero-width spaces, soft hyphens, BOM, etc.
+    4. Leetspeak substitution      — 0→o, 1→i, 3→e, @→a, $→s, 4→a, 5→s, 7→t
+    5. Collapse whitespace         — "i g n o r e" → "ignore"
+    6. Lowercase
+
+    The ORIGINAL text is preserved everywhere else in the pipeline.
+    Only the pre-filter uses this normalized copy.
+    """
+    # Step 1: NFKD decompose (ﬁ → fi, ｉ → i, ０ → 0, cyrillic lookalikes → latin)
+    normalized = unicodedata.normalize("NFKD", text)
+    # Step 2: Encode to ASCII, dropping unmappable chars
+    normalized = normalized.encode("ascii", errors="ignore").decode("ascii")
+    # Step 3: Strip invisible / zero-width characters
+    normalized = _INVISIBLE_CHARS.sub("", normalized)
+    # Step 4: Leetspeak substitution
+    normalized = normalized.translate(_LEET_MAP)
+    # Step 5: Collapse whitespace (catches "i g n o r e  a l l" → "ignore all")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    # Step 6: Lowercase (pre-filter already uses re.IGNORECASE but normalizing is cleaner)
+    return normalized.lower()
+
+
+# ═══════════════════════════════════════════════════════════════
 # STAGE 1: REGEX PRE-FILTER
 # ═══════════════════════════════════════════════════════════════
 
 # Patterns that indicate prompt-injection or extremely dangerous operations.
 # Each tuple: (label, compiled regex)
+# NOTE: These run against NORMALIZED text (lowercase, no leetspeak, no invisible chars).
 _PREFILTER_PATTERNS = [
-    # Prompt injection / jailbreak signals
+    # ── Prompt injection / jailbreak — direct commands ────────────────────
     ("prompt_injection",   re.compile(r"\bignore\s+(all\s+)?(previous|prior|above|earlier)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\bdisregard\s+(all\s+)?(previous|prior|above|instructions)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\bforget\s+(all\s+)?(previous|prior|above|instructions)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\bact\s+as\s+(if\s+you\s+are|a\s+different)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\byou\s+are\s+now\s+(?!a\s+financial)", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\bnew\s+instructions?\b", re.IGNORECASE)),
-    # Suspicious fund transfer indicators — only flag VERY large amounts (>$100K) to avoid
-    # blocking legitimate business transfers that should go through the AI risk scorer instead.
+    # ── Prompt injection — semantic rephrasings ────────────────────────────
+    ("prompt_injection",   re.compile(r"\bset\s+aside\s+(your|the|all)?\s*(previous|earlier|prior|above|old)?\s*(rules?|guidelines?|instructions?|constraints?|policies)\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\b(previous|prior|earlier)\s+(rules?|instructions?|guidelines?|constraints?)\s+(no\s+longer|don'?t|do\s+not|doesn'?t)\s+apply\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\boverride\s+(your|the|system|all)\s*(instructions?|rules?|constraints?|guidelines?|policies)\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\byour\s+(previous|prior|original|initial|system)\s+(instructions?|rules?|guidelines?|prompt)\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\bpretend\s+(you\s+are|to\s+be|you'?re)\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\bimagine\s+you\s+(are|have\s+no)\b", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"\bfrom\s+now\s+on\s+(you|ignore|act|behave|respond)\b", re.IGNORECASE)),
+    # ── Mode/role override ─────────────────────────────────────────────────
+    ("mode_override",      re.compile(r"\bswitch\s+(to|into)\s+(admin|unrestricted|unlimited|debug|god|developer?|root|maintenance)\s*mode\b", re.IGNORECASE)),
+    ("mode_override",      re.compile(r"\b(admin|developer?|debug|god|maintenance|unrestricted)\s+mode\s*(enabled?|activated?|on)\b", re.IGNORECASE)),
+    ("mode_override",      re.compile(r"\byou\s+(have\s+no\s+restrictions?|are\s+unrestricted|can\s+do\s+anything)\b", re.IGNORECASE)),
+    # ── Bypass / disable safety ────────────────────────────────────────────
+    ("safety_bypass",      re.compile(r"\b(bypass|skip|circumvent|disable|turn\s+off|deactivate)\s+(security|safety|filter|guard|check|restriction|policy|policies)\b", re.IGNORECASE)),
+    ("safety_bypass",      re.compile(r"\bwithout\s+(any|the)?\s*(checks?|verification|approval|authorization|restrictions?|oversight)\b", re.IGNORECASE)),
+    ("safety_bypass",      re.compile(r"\b(do\s+not|don'?t|never)\s+(log|audit|track|record|report|flag)\s+(this|anything|it)\b", re.IGNORECASE)),
+    ("safety_bypass",      re.compile(r"\bdelete\s+(all\s+)?(audit|log|logs?|trail|history|records?)\b", re.IGNORECASE)),
+    # ── Suspicious fund transfers ──────────────────────────────────────────
     ("suspicious_transfer", re.compile(r"\btransfer\b.{0,60}\$[\d,]*[5-9]\d{2},\d{3}", re.IGNORECASE)),  # $500K+
-    ("suspicious_transfer", re.compile(r"\btransfer\b.{0,60}\$[\d,]+[Mm]\b", re.IGNORECASE)),  # $1M+
-    ("suspicious_transfer", re.compile(r"\bwire\s+(funds|money|payment)\b", re.IGNORECASE)),
-    # Mass destructive operations
+    ("suspicious_transfer", re.compile(r"\btransfer\b.{0,60}\$[\d,]+[Mm]\b", re.IGNORECASE)),             # $1M+
+    ("suspicious_transfer", re.compile(r"\bwire\s+(funds?|money|payment|transfer)\b", re.IGNORECASE)),
+    # ── Mass destructive operations ────────────────────────────────────────
     ("destructive_op",     re.compile(r"\bdelete\s+all\b", re.IGNORECASE)),
     ("destructive_op",     re.compile(r"\bdrop\s+(table|database|all)\b", re.IGNORECASE)),
     ("destructive_op",     re.compile(r"\btruncate\s+(table|all)\b", re.IGNORECASE)),
     ("destructive_op",     re.compile(r"\bpurge\s+all\b", re.IGNORECASE)),
-    # Privilege escalation
+    # ── Privilege escalation ───────────────────────────────────────────────
     ("privilege_escalation", re.compile(r"\bgrant\s+(admin|root|superuser|all\s+privileges)\b", re.IGNORECASE)),
     ("privilege_escalation", re.compile(r"\belevate\s+(privileges?|permissions?|access)\b", re.IGNORECASE)),
-    # External exfiltration signals
+    # ── External exfiltration ──────────────────────────────────────────────
     ("exfiltration",       re.compile(r"\bsend\s+.{0,40}@[a-z0-9.\-]+\.[a-z]{2,}\b", re.IGNORECASE)),
     ("exfiltration",       re.compile(r"\bexport\s+all\b", re.IGNORECASE)),
 ]
@@ -67,16 +132,33 @@ class PreFilterResult:
 
 def run_prefilter(text: str) -> PreFilterResult:
     """
-    Run all regex pre-filter patterns against the raw (non-anonymized) input.
-    Returns immediately on first match to minimize latency.
+    Run all regex pre-filter patterns against the input text.
+
+    Matches against BOTH:
+    - The normalized text (catches leetspeak, unicode lookalikes, obfuscation)
+    - The original text (catches exact patterns that normalization might alter)
+
+    Returns immediately after collecting all matches (does not short-circuit
+    on first match — we want to surface all triggered patterns for the audit log).
     """
+    normalized = _normalize_text(text)
     matched_patterns = []
     matched_texts = []
+    seen_labels = set()  # deduplicate same label triggered by both original+normalized
+
     for label, pattern in _PREFILTER_PATTERNS:
-        m = pattern.search(text)
+        # Check normalized first (catches obfuscation)
+        m = pattern.search(normalized)
+        if not m:
+            # Fallback: check original (catches patterns that normalization might mangle)
+            m = pattern.search(text)
         if m:
-            matched_patterns.append(label)
-            matched_texts.append(m.group())
+            key = (label, m.group().lower()[:40])
+            if key not in seen_labels:
+                matched_patterns.append(label)
+                matched_texts.append(m.group())
+                seen_labels.add(key)
+
     triggered = len(matched_patterns) > 0
     return PreFilterResult(triggered=triggered, matched_patterns=matched_patterns, matched_texts=matched_texts)
 
@@ -188,16 +270,21 @@ def _heuristic_score(text: str, metadata: dict) -> RiskScore:
 # ═══════════════════════════════════════════════════════════════
 
 _ATTACK_VECTOR_PATTERNS = [
-    ("Prompt Injection",       re.compile(r"\b(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above|instructions)\b", re.IGNORECASE)),
-    ("Jailbreak Attempt",      re.compile(r"\b(act\s+as|you\s+are\s+now|pretend\s+you\s+are)\b", re.IGNORECASE)),
-    ("Role Override",          re.compile(r"\bnew\s+instructions?\b|\byour\s+new\s+(role|task|job)\b", re.IGNORECASE)),
-    ("Privilege Escalation",   re.compile(r"\b(grant|elevate)\s+(admin|root|superuser|privileges?|permissions?)\b", re.IGNORECASE)),
-    ("Mass Data Exfiltration", re.compile(r"\b(export|send|forward)\s+all\b", re.IGNORECASE)),
-    ("Destructive Operation",  re.compile(r"\b(delete|drop|truncate|purge)\s+all\b", re.IGNORECASE)),
-    ("Suspicious Wire Transfer", re.compile(r"\b(wire|transfer)\s+(funds|money|payment)\b", re.IGNORECASE)),
-    ("External Data Send",     re.compile(r"\bsend\s+.{0,40}@[a-z0-9.\-]+\.[a-z]{2,}\b", re.IGNORECASE)),
-    ("Credential Harvesting",  re.compile(r"\b(password|api.?key|secret|token|credential)\b", re.IGNORECASE)),
-    ("Social Engineering",     re.compile(r"\b(urgently|immediately|without\s+(any\s+)?checks?|bypass)\b", re.IGNORECASE)),
+    ("Prompt Injection",         re.compile(r"\b(ignore|disregard|forget)\s+(all\s+)?(previous|prior|above|instructions)\b", re.IGNORECASE)),
+    ("Jailbreak Attempt",        re.compile(r"\b(act\s+as|you\s+are\s+now|pretend\s+you\s+are|imagine\s+you\s+are)\b", re.IGNORECASE)),
+    ("Role Override",            re.compile(r"\bnew\s+instructions?\b|\byour\s+new\s+(role|task|job)\b", re.IGNORECASE)),
+    ("Semantic Rephrasing",      re.compile(r"\b(set\s+aside|override)\s+(your|the|all)?\s*(previous|prior|earlier|system)?\s*(rules?|guidelines?|instructions?|constraints?)\b", re.IGNORECASE)),
+    ("Mode Override",            re.compile(r"\b(switch\s+to|enable|activate)\s+(admin|unrestricted|debug|god|developer?|root)\s*mode\b", re.IGNORECASE)),
+    ("Safety Bypass",            re.compile(r"\b(bypass|circumvent|disable|skip)\s+(security|safety|filter|guard|check|restriction)\b", re.IGNORECASE)),
+    ("Audit Suppression",        re.compile(r"\b(do\s+not|don'?t|never)\s+(log|audit|track|record)\b|\bdelete\s+(all\s+)?(audit|log|trail)\b", re.IGNORECASE)),
+    ("Privilege Escalation",     re.compile(r"\b(grant|elevate)\s+(admin|root|superuser|privileges?|permissions?)\b", re.IGNORECASE)),
+    ("Mass Data Exfiltration",   re.compile(r"\b(export|send|forward)\s+all\b", re.IGNORECASE)),
+    ("Destructive Operation",    re.compile(r"\b(delete|drop|truncate|purge)\s+all\b", re.IGNORECASE)),
+    ("Suspicious Wire Transfer", re.compile(r"\b(wire|transfer)\s+(funds?|money|payment)\b", re.IGNORECASE)),
+    ("External Data Send",       re.compile(r"\bsend\s+.{0,40}@[a-z0-9.\-]+\.[a-z]{2,}\b", re.IGNORECASE)),
+    ("Credential Harvesting",    re.compile(r"\b(password|api.?key|secret|token|credential)\b", re.IGNORECASE)),
+    ("Social Engineering",       re.compile(r"\b(urgently|immediately|without\s+(any\s+)?checks?|bypass)\b", re.IGNORECASE)),
+    ("Obfuscation Attempt",      re.compile(r"[il1|][g9][n][o0][r][e3]|[d][i1][s$][r][e3][g9][a@][r][d]", re.IGNORECASE)),  # leetspeak patterns in raw text
 ]
 
 _FAST_PATH_BLOCKLIST = re.compile(
@@ -323,13 +410,17 @@ class RiskScorer:
     def detect_attack_vectors(self, text: str) -> list[dict]:
         """
         Scan text for known attack patterns and return a list of findings.
+        Checks both original and normalized text to catch obfuscated attacks.
         Each finding: {"vector": str, "matched_text": str}
         """
+        normalized = _normalize_text(text)
         findings = []
+        seen = set()
         for vector_name, pattern in _ATTACK_VECTOR_PATTERNS:
-            m = pattern.search(text)
-            if m:
+            m = pattern.search(normalized) or pattern.search(text)
+            if m and vector_name not in seen:
                 findings.append({"vector": vector_name, "matched_text": m.group()})
+                seen.add(vector_name)
         return findings
 
     # ----------------------------------------------------------

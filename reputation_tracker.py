@@ -129,6 +129,18 @@ class ReputationTracker:
         else:
             self._agents.clear()
 
+    def get_recent_block_rate(self, agent_id: str, window: int = 5) -> float:
+        """
+        Return the fraction of the last `window` requests that were blocked.
+        Returns 0.0 if the agent has no history yet.
+        """
+        entry = self._get_or_create(agent_id)
+        if not entry.history:
+            return 0.0
+        recent = entry.history[-window:]
+        blocked = sum(1 for h in recent if h["tier"] == "block")
+        return blocked / len(recent)
+
     # ── Private ───────────────────────────────────────────────
 
     def _get_or_create(self, agent_id: str) -> ReputationEntry:
