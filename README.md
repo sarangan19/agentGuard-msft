@@ -74,6 +74,46 @@ Open http://localhost:8501 in your browser.
 
 ---
 
+## Terminal Usage (Core Product)
+
+### Install as a package
+
+```bash
+pip install -e .
+```
+
+### Quick start
+
+```python
+from agentguard import AgentGuardMiddleware
+
+middleware = AgentGuardMiddleware(verbose=True)
+anonymized, mapping = middleware.intercept_message("Transfer $50K to Acme Corp")
+audit = middleware.validate_action("transfer_funds", {
+    "original_text": "Transfer $50K to Acme Corp",
+    "anonymized_text": anonymized,
+    "metadata": {"entity_count": len(mapping), "detection_method": "unknown"},
+})
+```
+
+### Run examples
+
+```bash
+python examples/simple_usage.py
+python examples/attack_demo.py
+```
+
+---
+
+## Dashboard Usage (Monitoring Tool)
+
+- Launch with `streamlit run app.py`
+- Live Activity panel shows the most recent Cosmos DB decisions
+- Decision Log includes a source filter: Dashboard vs Terminal
+- All terminal decisions are tagged with `source="terminal"`
+
+---
+
 ## Demo Scenarios
 
 | # | Scenario | Expected Result |
