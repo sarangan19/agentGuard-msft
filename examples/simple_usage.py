@@ -16,7 +16,7 @@ def _print_banner():
  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝
     """
     print(banner)
-    print("AgentGuard Terminal Middleware v4.2.7")
+    print("AgentGuard Terminal Middleware v4.2.14")
     print("Type 'exit' or 'quit' to leave.\n")
 
 
@@ -49,8 +49,12 @@ def main():
             return
 
         user_input = _truncate(user_input)
-        anonymized, entity_map = middleware.intercept_message(user_input)
-        metadata = {"entity_count": len(entity_map), "detection_method": "unknown"}
+        privacy_result = middleware.intercept_message(user_input)
+        anonymized = privacy_result["anonymized_text"]
+        entity_map = privacy_result.get("mapping", {})
+        metadata = privacy_result.get("metadata", {})
+        metadata["entity_count"] = privacy_result.get("entity_count", 0)
+        metadata["detection_method"] = privacy_result.get("detection_method", "unknown")
 
         agent_decision = agent.process(anonymized, metadata=metadata)
         action = agent_decision.get("action", "unknown_action")
@@ -59,7 +63,7 @@ def main():
             "original_text": user_input,
             "anonymized_text": anonymized,
             "metadata": metadata,
-            "entity_count": len(entity_map),
+            "entity_count": privacy_result.get("entity_count", 0),
         }
 
         try:
@@ -75,7 +79,7 @@ def main():
                 "agent_id": middleware.agent_id,
                 "original_text": user_input[:500],
                 "anonymized_text": anonymized[:500],
-                "entity_count": len(entity_map),
+                "entity_count": privacy_result.get("entity_count", 0),
                 "risk_score": exc.risk_score,
                 "tier": exc.tier,
                 "risk_reasoning": exc.reasoning,

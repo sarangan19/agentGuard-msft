@@ -17,11 +17,15 @@ def main():
 
     for idx, payload in enumerate(ATTACKS, start=1):
         print(f"Scenario {idx}: {payload}")
-        anonymized, _ = middleware.intercept_message(payload)
+        privacy_result = middleware.intercept_message(payload)
+        anonymized = privacy_result["anonymized_text"]
+        metadata = privacy_result.get("metadata", {})
+        metadata["entity_count"] = privacy_result.get("entity_count", 0)
+        metadata["detection_method"] = privacy_result.get("detection_method", "unknown")
         context = {
             "original_text": payload,
             "anonymized_text": anonymized,
-            "metadata": {"entity_count": 0, "detection_method": "unknown"},
+            "metadata": metadata,
         }
         try:
             middleware.validate_action("execute_payment", context=context)

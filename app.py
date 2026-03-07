@@ -11,7 +11,6 @@ import os
 import uuid
 import json
 import time
-import random
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -523,7 +522,9 @@ with st.sidebar:
     st.markdown('<div class="section-tag" style="margin-top:0.5rem;">Demo Scenarios</div>', unsafe_allow_html=True)
 
     def _on_scenario_change():
-        st.session_state.tab1_input = SCENARIOS[st.session_state.selected_scenario]["prompt"]
+        new_prompt = SCENARIOS[st.session_state.selected_scenario]["prompt"]
+        st.session_state.tab1_input = new_prompt
+        st.session_state._scenario_prompt = new_prompt
 
     selected_scenario = st.selectbox(
         "Select a scenario:",
@@ -534,6 +535,10 @@ with st.sidebar:
         on_change=_on_scenario_change,
     )
     scenario_data = SCENARIOS[selected_scenario]
+
+    # Keep _scenario_prompt in sync on first load
+    if "_scenario_prompt" not in st.session_state:
+        st.session_state._scenario_prompt = scenario_data["prompt"]
     st.caption(f"_{scenario_data['description']}_")
     st.divider()
 
@@ -619,7 +624,7 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
   <h1>AgentGuard <span class="live-badge">LIVE</span></h1>
-  <p>[VERSION 4.2.14] &nbsp;|&nbsp; REAL-TIME PII MASKING / CONTENT FILTERING / RISK SCORING &nbsp;|&nbsp; ZERO-TRUST ARCHITECTURE FOR AUTONOMOUS WORKFLOWS</p>
+  <p>[VERSION 4.2.16] &nbsp;|&nbsp; REAL-TIME PII MASKING / CONTENT FILTERING / RISK SCORING &nbsp;|&nbsp; ZERO-TRUST ARCHITECTURE FOR AUTONOMOUS WORKFLOWS</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -629,7 +634,7 @@ st.markdown("""
 
 
 def _render_live_activity():
-    recent_cosmos = services["cosmos"].get_recent_decisions(limit=5)
+    recent_cosmos = services["cosmos"].get_recent_decisions(limit=20)
     if recent_cosmos:
         latest = recent_cosmos[0]
         latest_source = (latest.get("source") or "streamlit").lower()
@@ -638,7 +643,7 @@ def _render_live_activity():
 
         st.markdown('<div class="live-activity-title">LIVE ACTIVITY</div>', unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        
+
         c1.markdown(
             f'<div class="live-activity-card {source_cls}">'
             f'<div class="live-activity-label">Source</div>'
@@ -646,7 +651,7 @@ def _render_live_activity():
             f'</div>',
             unsafe_allow_html=True,
         )
-        
+
         c2.markdown(
             f'<div class="live-activity-card live-card-info">'
             f'<div class="live-activity-label">Last Action</div>'
@@ -654,10 +659,10 @@ def _render_live_activity():
             f'</div>',
             unsafe_allow_html=True,
         )
-        
+
         risk_score = int(latest.get("risk_score", 0) or 0)
         risk_tint_cls = "live-risk-safe" if risk_score <= 30 else "live-risk-warn" if risk_score <= 60 else "live-risk-danger" if risk_score <= 85 else "live-risk-block"
-        
+
         c3.markdown(
             f'<div class="live-activity-card {risk_tint_cls}">'
             f'<div class="live-activity-label">Risk</div>'
@@ -666,18 +671,50 @@ def _render_live_activity():
             unsafe_allow_html=True,
         )
 
+        # Build per-agent reputation lookup from session state tracker
+        tracker = st.session_state.reputation_tracker
+        rep_cache = {}
+
+        def _get_rep(agent_id):
+            if not agent_id:
+                return ("—", "—", "—")
+            if agent_id not in rep_cache:
+                t = tracker.get_trust_level(agent_id)
+                rep_cache[agent_id] = (
+                    f"{t['score']:.0f}/100",
+                    t["label"],
+                    f"{t['block_count']}/{t['request_count']}",
+                )
+            return rep_cache[agent_id]
+
         live_rows = []
         for r in recent_cosmos:
+            agent_id = r.get("agent_id") or ""
+            rep_score, rep_label, rep_blocks = _get_rep(agent_id)
+            # For terminal records trust_level/recent_block_rate come from Cosmos
+            cosmos_trust  = r.get("trust_level") or rep_label
+            cosmos_brate  = r.get("recent_block_rate")
+            block_rate_str = f"{cosmos_brate:.0%}" if cosmos_brate is not None else rep_blocks
+
             live_rows.append({
-                "Agent": r.get("agent_id", ""),
-                "Time": (r.get("timestamp") or r.get("_ts_utc") or "")[:19].replace("T", " "),
-                "Request": (r.get("original_text") or "")[:60] + ("..." if len(r.get("original_text") or "") > 60 else ""),
-                "Tier": (r.get("tier") or "").upper(),
-                "Risk": r.get("risk_score", 0),
-                "Action": r.get("agent_action", ""),
-                "Source": "Terminal" if r.get("source") == "terminal" else "Dashboard",
+                "Agent":           agent_id,
+                "Time":            (r.get("timestamp") or "")[:19].replace("T", " "),
+                "Source":          "Terminal" if r.get("source") == "terminal" else "Dashboard",
+                "Tier":            (r.get("tier") or "").upper(),
+                "Risk Score":      r.get("risk_score", 0),
+                "PII Entities":    r.get("entity_count", 0),
+                "Pre-filter":      "HIT" if r.get("prefilter_triggered") else "Clean",
+                "Content Safety":  "BLOCKED" if r.get("content_safety_blocked") else "Passed",
+                "Action":          r.get("agent_action", ""),
+                "Scored By":       r.get("scored_by") or r.get("detection_method") or "—",
+                "Rep Score":       rep_score,
+                "Trust Level":     cosmos_trust,
+                "Block Rate":      block_rate_str,
+                "Cosmos Logged":   "Yes" if r.get("id") else "No",
             })
-        st.dataframe(live_rows, use_container_width=True, height=300)
+        st.dataframe(live_rows, use_container_width=True, height=340)
+    else:
+        st.info("No activity yet. Run the demo pipeline or the terminal middleware to see live decisions here.")
 
 
 _wrap_fragment(_render_live_activity)()
@@ -794,6 +831,14 @@ def run_pipeline(prompt: str) -> dict:
         "scored_by": risk_result.scored_by,
         "source": "streamlit",
     }
+    # ── Update reputation score after every decision ─────────────
+    st.session_state.reputation_tracker.update_score("financial_agent", risk_result.tier)
+    trust_info = st.session_state.reputation_tracker.get_trust_level("financial_agent")
+    recent_block_rate = st.session_state.reputation_tracker.get_recent_block_rate("financial_agent", window=5)
+    audit_record["trust_level"] = trust_info["label"]
+    audit_record["reputation_score"] = trust_info["score"]
+    audit_record["recent_block_rate"] = round(recent_block_rate, 2)
+
     cosmos_logged = services["cosmos"].log_decision(audit_record)
 
     st.session_state.azure_call_count += 1
@@ -833,6 +878,10 @@ def run_pipeline(prompt: str) -> dict:
         "agent_risk_level": agent_decision.get("risk_level"),
         "cosmos_logged": cosmos_logged,
         "timestamp": audit_record["timestamp"],
+        "reputation_score": trust_info["score"],
+        "trust_level": trust_info["label"],
+        "trust_color": trust_info["color"],
+        "recent_block_rate": round(recent_block_rate, 2),
     }
 
 
@@ -1237,10 +1286,12 @@ st.markdown("Run the AgentGuard pipeline using curated demo scenarios.")
 
 st.markdown('<div class="section-tag">Request Input</div>', unsafe_allow_html=True)
 
-prompt_value = scenario_data["prompt"]
+prompt_value = st.session_state.get("_scenario_prompt", scenario_data["prompt"])
+if "tab1_input" not in st.session_state:
+    st.session_state.tab1_input = prompt_value
+
 user_input = st.text_area(
     "Agent Request:",
-    value=prompt_value,
     height=100,
     label_visibility="collapsed",
     key="tab1_input",
@@ -1455,42 +1506,6 @@ _wrap_fragment(_render_escalations)()
 # ARCHITECTURE OVERVIEW
 # ================================================================
 with st.expander("Architecture — How AgentGuard Works", expanded=False):
-    st.code("""
-User Request
-    |
-    |---> [1] Regex Pre-filter          Zero latency, zero cost
-    |         -> BLOCK if injection/attack pattern detected
-    |
-    |---> [2] Azure AI Content Safety   ~200ms
-    |         -> BLOCK if harmful content detected
-    |
-    |---> [3] Azure OpenAI PII Detection ~1-2s
-    |         -> Returns: anonymized_text + entity_map + metadata
-    |
-    |---> [4] Risk Scoring Engine        ~1-2s
-    |         -> Azure OpenAI scores 4 factors (0-100)
-    |         -> Attack vector detection (10 patterns)
-    |         -> Fast-path eligibility check
-    |         -> Heuristic fallback if Azure unavailable
-    |
-    |---> [5] Intervention Tier Engine
-    |         -> AUTO (0-30) / SOFT (31-60) / HARD (61-85) / BLOCK (85+)
-    |
-    |---> [6] Financial Agent           (Anonymized text only)
-    |         -> Selects plugin, builds parameters
-    |
-    |---> [7] De-anonymization
-    |         -> Restore PII in agent response for display
-    |
-    |---> [8] Cosmos DB Audit Log       Real Azure persistence
-    |         -> Full record: score, tier, PII count, action, patterns
-    |
-    |---> [9] Reputation Tracker        In-session agent trust scoring
-              -> Score updates: auto +3, soft -2, hard -8, block -20
-""", language=None)
-    st.markdown("""
-**Azure Services Used:**
-- Azure OpenAI (gpt-4.1-mini) — PII detection + risk scoring
-- Azure Cosmos DB for NoSQL — Audit trail persistence
-- Azure AI Content Safety — Harmful content screening
-""")
+    col_img, col_pad = st.columns([1, 1])
+    with col_img:
+        st.image("assets/architecture_flow.png", use_container_width=True)

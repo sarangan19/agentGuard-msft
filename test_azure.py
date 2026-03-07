@@ -46,11 +46,15 @@ def test_env_vars():
         "CONTENT_SAFETY_KEY",
         "KEYVAULT_URL",
     ]
+    sensitive_keywords = ("KEY", "SECRET", "PASSWORD", "TOKEN")
     all_ok = True
     for var in required:
         val = os.getenv(var)
         if val:
-            print(f"{PASS}  {var} = {val[:30]}...")
+            if any(kw in var.upper() for kw in sensitive_keywords):
+                print(f"{PASS}  {var} = ***SET*** (hidden)")
+            else:
+                print(f"{PASS}  {var} = {val[:30]}...")
         else:
             print(f"{FAIL}  {var} — NOT SET")
             all_ok = False

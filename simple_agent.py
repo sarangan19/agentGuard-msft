@@ -16,7 +16,6 @@ de-anonymizes the response afterwards.
 import re
 import logging
 from typing import Optional
-from azure_services import get_openai_service
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +143,7 @@ class SimpleFinancialAgent:
     """
 
     def __init__(self):
-        self.openai_svc = get_openai_service()
+        pass
 
     # ----------------------------------------------------------
     def process(self, anonymized_text: str, metadata: Optional[dict] = None) -> dict:

@@ -14,7 +14,7 @@ def _read_requirements(path):
 
 setup(
     name="agentguard",
-    version="4.2.5",
+    version="4.2.14",
     description="AgentGuard terminal middleware and dashboard integration",
     packages=find_packages(),
     install_requires=_read_requirements("requirements.txt"),

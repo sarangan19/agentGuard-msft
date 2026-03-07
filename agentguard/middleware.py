@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import uuid
@@ -46,7 +47,7 @@ class AgentGuardMiddleware:
             self._print(f"[AgentGuard] 🔒 Privacy check: Anonymized {count} PII entities", "yellow")
         else:
             self._print("[AgentGuard] ✓ Privacy check: No PII detected", "green")
-        return privacy_result["anonymized_text"], privacy_result.get("mapping", {})
+        return privacy_result
 
     def validate_action(self, action, context=None, agent_id=None):
         context = context or {}
@@ -108,13 +109,16 @@ class AgentGuardMiddleware:
             self._log_to_cosmos(audit_record)
             raise SecurityException("Blocked by Azure Content Safety", risk.total, "block", risk.prefilter_patterns, risk.reasoning)
 
-        if tier == "block" or trust_level == "untrusted" and recent_block_rate >= 0.6:
+        if tier == "block" or (trust_level == "untrusted" and recent_block_rate >= 0.6):
             self._print("[AgentGuard] 🚨 BLOCKED action", "red")
+            self.reputation.update_score(agent_id, "block")
             self._log_to_cosmos(audit_record)
             raise SecurityException("High risk action blocked", risk.total, tier, risk.prefilter_patterns, risk.reasoning)
 
         if tier in ("soft", "hard"):
             self._print("[AgentGuard] ⚠️ Intervention required", "yellow")
+            self.reputation.update_score(agent_id, tier)
+            self._log_to_cosmos(audit_record)
             raise InterventionRequired(
                 "Confirmation required",
                 risk.total,
@@ -163,7 +167,7 @@ class AgentGuardMiddleware:
         try:
             path = os.path.join(os.getcwd(), "terminal_decisions.log")
             with open(path, "a", encoding="utf-8") as handle:
-                handle.write(f"{record}\n")
+                handle.write(json.dumps(record, default=str) + "\n")
         except Exception:
             pass
 

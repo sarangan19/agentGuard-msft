@@ -199,9 +199,6 @@ class CosmosDBService:
         if self.container is None:
             return []
         try:
-            query = (
-                "SELECT TOP @limit * FROM c ORDER BY c._ts DESC"
-            )
             items = list(
                 self.container.query_items(
                     query=f"SELECT TOP {limit} * FROM c ORDER BY c._ts DESC",

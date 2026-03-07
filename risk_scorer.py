@@ -69,7 +69,7 @@ def _normalize_text(text: str) -> str:
     normalized = _INVISIBLE_CHARS.sub("", normalized)
     # Step 4: Leetspeak substitution
     normalized = normalized.translate(_LEET_MAP)
-    # Step 5: Collapse whitespace (catches "i g n o r e  a l l" → "ignore all")
+    # Step 5: Collapse multiple whitespace to single space
     normalized = re.sub(r"\s+", " ", normalized).strip()
     # Step 6: Lowercase (pre-filter already uses re.IGNORECASE but normalizing is cleaner)
     return normalized.lower()
@@ -90,6 +90,11 @@ _PREFILTER_PATTERNS = [
     ("prompt_injection",   re.compile(r"\bact\s+as\s+(if\s+you\s+are|a\s+different)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\byou\s+are\s+now\s+(?!a\s+financial)", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\bnew\s+instructions?\b", re.IGNORECASE)),
+    # ── Spaced-character obfuscation (e.g. "i g n o r e  a l l") ──────────
+    # These catch attackers who insert spaces between each character to evade word-level patterns.
+    ("prompt_injection",   re.compile(r"(?<!\w)i\s*g\s*n\s*o\s*r\s*e(?!\w)", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"(?<!\w)d\s*i\s*s\s*r\s*e\s*g\s*a\s*r\s*d(?!\w)", re.IGNORECASE)),
+    ("prompt_injection",   re.compile(r"(?<!\w)f\s*o\s*r\s*g\s*e\s*t(?!\w)", re.IGNORECASE)),
     # ── Prompt injection — semantic rephrasings ────────────────────────────
     ("prompt_injection",   re.compile(r"\bset\s+aside\s+(your|the|all)?\s*(previous|earlier|prior|above|old)?\s*(rules?|guidelines?|instructions?|constraints?|policies)\b", re.IGNORECASE)),
     ("prompt_injection",   re.compile(r"\b(previous|prior|earlier)\s+(rules?|instructions?|guidelines?|constraints?)\s+(no\s+longer|don'?t|do\s+not|doesn'?t)\s+apply\b", re.IGNORECASE)),
@@ -253,6 +258,8 @@ def _heuristic_score(text: str, metadata: dict) -> RiskScore:
     elif "10K-100K" in magnitude:
         factors["policy_compliance"] += 10
 
+    # Clamp each factor to the valid 0-25 range before summing
+    factors = {k: max(0, min(25, v)) for k, v in factors.items()}
     total = min(100, sum(factors.values()))
     tier, color = _score_to_tier(total)
     return RiskScore(

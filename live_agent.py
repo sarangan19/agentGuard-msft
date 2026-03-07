@@ -149,11 +149,12 @@ def _fallback_decision(user_query: str) -> dict:
     }
 
 
+_live_agent_instance: Optional[LiveAgent] = None
+
+
 def get_live_agent() -> LiveAgent:
     """Factory — returns a module-level singleton."""
     global _live_agent_instance
-    try:
-        return _live_agent_instance  # type: ignore
-    except NameError:
+    if _live_agent_instance is None:
         _live_agent_instance = LiveAgent()
-        return _live_agent_instance
+    return _live_agent_instance

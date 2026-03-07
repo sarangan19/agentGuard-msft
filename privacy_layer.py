@@ -95,7 +95,9 @@ def _regex_detect_pii(text: str) -> dict:
         for match in pattern.finditer(text):
             start, end = match.span()
             # Skip if this span overlaps with an already-captured entity
-            if any(s <= start < e or s < end <= e for s, e in used_spans):
+            # Uses the standard half-open interval overlap check: two intervals
+            # [start,end) and [s,e) overlap iff start < e and s < end.
+            if any(start < e and s < end for s, e in used_spans):
                 continue
             count = type_counters.get(pii_type, 0)
             placeholder = f"[{pii_type}_{_letter(count)}]"
