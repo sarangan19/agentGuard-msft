@@ -68,6 +68,7 @@ class LiveAgent:
         from azure_services import AzureOpenAIService
         self.svc = AzureOpenAIService()
         self.company_context = COMPANY_CONTEXT
+        self.agent_id = "live-financial-agent"
 
     def process_request(self, user_query: str) -> dict:
         """Agent decides what action to take based on natural language input."""

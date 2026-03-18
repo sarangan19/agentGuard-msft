@@ -5,3 +5,12 @@ __pycache__/
 
 fix_list.md
 streamlit_error.log
+
+# HTML files
+*.html
+
+# Markdown files
+*.md
+
+# Images
+artifacts/image.png

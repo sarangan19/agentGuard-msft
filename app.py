@@ -38,7 +38,7 @@ def _load_services():
     from azure_services import get_openai_service, get_cosmos_service, get_content_safety_service
     from privacy_layer import get_privacy_layer
     from risk_scorer import get_risk_scorer
-    from simple_agent import get_agent
+    from live_agent import get_live_agent
 
     return {
         "openai": get_openai_service(),
@@ -46,13 +46,13 @@ def _load_services():
         "content_safety": get_content_safety_service(),
         "privacy": get_privacy_layer(),
         "risk_scorer": get_risk_scorer(),
-        "agent": get_agent(),
+        "agent": get_live_agent(),
     }
 
 services = _load_services()
 
 # Guard: if the cached PrivacyLayer predates scan_output(), bust the cache and reload.
-if not hasattr(services.get("privacy"), "scan_output"):
+if not hasattr(services.get("privacy"), "scan_output") or not hasattr(services.get("agent"), "agent_id"):
     _load_services.clear()
     services = _load_services()
 
@@ -802,10 +802,25 @@ def run_pipeline(prompt: str) -> dict:
     attack_vectors = scorer.detect_attack_vectors(prompt)
     is_fast_path   = scorer.is_fast_path_eligible(prompt)
 
-    agent_decision = services["agent"].process(
-        anonymized_text=privacy_result["anonymized_text"],
-        metadata=privacy_result["metadata"],
-    )
+    _raw_decision = services["agent"].process_request(privacy_result["anonymized_text"])
+    _action_risk_map = {
+        "execute_payment": "high",
+        "delete_records": "critical",
+        "modify_permissions": "critical",
+        "send_email": "medium",
+        "generate_report": "low",
+        "query_database": "low",
+    }
+    _act = _raw_decision.get("action", "query_database")
+    agent_decision = {
+        "action": _act,
+        "plugin": f"LiveAgent.{_act}",
+        "parameters": _raw_decision.get("params", {}),
+        "confidence": _raw_decision.get("confidence", 0.5),
+        "simulated_result": {"sensitive_data_involved": _raw_decision.get("sensitive_data_involved", False)},
+        "reasoning": _raw_decision.get("reasoning", ""),
+        "risk_level": _action_risk_map.get(_act, "low"),
+    }
     agent_response_display = services["privacy"].de_anonymize(
         agent_decision.get("reasoning", ""),
         privacy_result["mapping"],
@@ -814,7 +829,7 @@ def run_pipeline(prompt: str) -> dict:
     audit_record = {
         "id": record_id,
         "session_id": session_id,
-        "agent_id": "financial_agent",
+        "agent_id": services["agent"].agent_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "original_text": prompt[:500],
         "anonymized_text": privacy_result["anonymized_text"][:500],
@@ -832,9 +847,10 @@ def run_pipeline(prompt: str) -> dict:
         "source": "streamlit",
     }
     # ── Update reputation score after every decision ─────────────
-    st.session_state.reputation_tracker.update_score("financial_agent", risk_result.tier)
-    trust_info = st.session_state.reputation_tracker.get_trust_level("financial_agent")
-    recent_block_rate = st.session_state.reputation_tracker.get_recent_block_rate("financial_agent", window=5)
+    _agent_id = services["agent"].agent_id
+    st.session_state.reputation_tracker.update_score(_agent_id, risk_result.tier)
+    trust_info = st.session_state.reputation_tracker.get_trust_level(_agent_id)
+    recent_block_rate = st.session_state.reputation_tracker.get_recent_block_rate(_agent_id, window=5)
     audit_record["trust_level"] = trust_info["label"]
     audit_record["reputation_score"] = trust_info["score"]
     audit_record["recent_block_rate"] = round(recent_block_rate, 2)
@@ -991,7 +1007,7 @@ def render_results(result: dict):
             unsafe_allow_html=True,
         )
 
-        rep = st.session_state.reputation_tracker.get_trust_level("financial_agent")
+        rep = st.session_state.reputation_tracker.get_trust_level(services["agent"].agent_id)
         rep_cls = {
             "trusted":   "metric-safe",
             "normal":    "metric-info",
@@ -1339,7 +1355,7 @@ if run_clicked:
             "risk_score": result["risk_score"],
             "entity_count": result["entity_count"],
             "agent_action": result["agent_action"],
-            "agent_id": "financial_agent",
+            "agent_id": services["agent"].agent_id,
             "prefilter": result["prefilter_triggered"],
             "cosmos_logged": result["cosmos_logged"],
         })
