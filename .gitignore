@@ -1,16 +1,20 @@
 .env
-IMPLEMENTATION_PLAN.md
 nul
 __pycache__/
-
-fix_list.md
 streamlit_error.log
 
-# HTML files
+# Auto-generated Python package metadata
+agentguard.egg-info/
+
+# Local Claude Code session data (memory, plans, hooks — personal, not team-shared)
+.claude/
+
+# Design/frontend files (generated artifacts, not source)
 *.html
 
-# Markdown files
-*.md
+# Specific markdown files that are local-only or superseded
+IMPLEMENTATION_PLAN.md
+fix_list.md
 
 # Images
 artifacts/image.png

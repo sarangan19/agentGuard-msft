@@ -131,7 +131,7 @@ if "reputation_tracker" not in st.session_state or not hasattr(
     st.session_state.reputation_tracker, "get_recent_block_rate"
 ):
     from reputation_tracker import ReputationTracker
-    st.session_state.reputation_tracker = ReputationTracker()
+    st.session_state.reputation_tracker = ReputationTracker(cosmos_service=services["cosmos"])
 
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = True
@@ -140,6 +140,10 @@ if "auto_refresh_interval" not in st.session_state:
 
 if "dashboard_history" not in st.session_state:
     st.session_state.dashboard_history = []
+
+# Multi-turn attack detection: sliding window of last 5 risk scores
+if "conversation_context" not in st.session_state:
+    st.session_state.conversation_context = []
 
 def _wrap_fragment(func):
     refresh_seconds = st.session_state.auto_refresh_interval
@@ -802,6 +806,36 @@ def run_pipeline(prompt: str) -> dict:
     attack_vectors = scorer.detect_attack_vectors(prompt)
     is_fast_path   = scorer.is_fast_path_eligible(prompt)
 
+    # ── Multi-turn attack detection ──────────────────────────────────────────
+    # Sliding window: keep last 5 risk scores for this session.
+    # If scores are non-decreasing across the window AND cumulative total >= 80,
+    # the request pattern indicates a reconnaissance-then-escalate attack.
+    # Apply a boost of up to +40 and recalculate tier accordingly.
+    def _tier_from_score(s: int) -> str:
+        if s <= 30: return "auto"
+        elif s <= 60: return "soft"
+        elif s <= 85: return "hard"
+        return "block"
+
+    _ctx = st.session_state.conversation_context
+    _ctx.append(risk_result.total)
+    if len(_ctx) > 5:
+        _ctx.pop(0)
+
+    _multi_turn_detected = False
+    _multi_turn_boost = 0
+    _effective_score = risk_result.total
+    _effective_tier  = risk_result.tier
+
+    if len(_ctx) >= 2:
+        _ascending  = all(_ctx[i] <= _ctx[i + 1] for i in range(len(_ctx) - 1))
+        _cumulative = sum(_ctx)
+        if _ascending and _cumulative >= 80:
+            _multi_turn_detected = True
+            _multi_turn_boost    = min(40, 100 - risk_result.total)
+            _effective_score     = min(100, risk_result.total + _multi_turn_boost)
+            _effective_tier      = _tier_from_score(_effective_score)
+
     _raw_decision = services["agent"].process_request(privacy_result["anonymized_text"])
     _action_risk_map = {
         "execute_payment": "high",
@@ -838,17 +872,20 @@ def run_pipeline(prompt: str) -> dict:
         "prefilter_triggered": risk_result.prefilter_triggered,
         "prefilter_patterns": risk_result.prefilter_patterns,
         "content_safety_blocked": cs_blocked,
-        "risk_score": risk_result.total,
-        "tier": risk_result.tier,
+        "risk_score": _effective_score,
+        "tier": _effective_tier,
         "risk_factors": risk_result.factors,
         "risk_reasoning": risk_result.reasoning,
         "agent_action": agent_decision.get("action"),
         "scored_by": risk_result.scored_by,
+        "multi_turn_detected": _multi_turn_detected,
+        "multi_turn_boost": _multi_turn_boost,
+        "multi_turn_window": list(_ctx),
         "source": "streamlit",
     }
     # ── Update reputation score after every decision ─────────────
     _agent_id = services["agent"].agent_id
-    st.session_state.reputation_tracker.update_score(_agent_id, risk_result.tier)
+    st.session_state.reputation_tracker.update_score(_agent_id, _effective_tier)
     trust_info = st.session_state.reputation_tracker.get_trust_level(_agent_id)
     recent_block_rate = st.session_state.reputation_tracker.get_recent_block_rate(_agent_id, window=5)
     audit_record["trust_level"] = trust_info["label"]
@@ -875,9 +912,10 @@ def run_pipeline(prompt: str) -> dict:
         "cs_available": cs_result.get("available", False),
         "cs_blocked": cs_blocked,
         "cs_scores": cs_result.get("scores", {}),
-        "risk_score": risk_result.total,
-        "tier": risk_result.tier,
-        "tier_color": risk_result.tier_color,
+        "risk_score": _effective_score,
+        "tier": _effective_tier,
+        "tier_color": TIER_CONFIG[_effective_tier]["color"],
+        "base_risk_score": risk_result.total,
         "risk_factors": risk_result.factors,
         "risk_reasoning": risk_result.reasoning,
         "scored_by": risk_result.scored_by,
@@ -885,6 +923,9 @@ def run_pipeline(prompt: str) -> dict:
         "prefilter_patterns": risk_result.prefilter_patterns,
         "attack_vectors": attack_vectors,
         "is_fast_path": is_fast_path,
+        "multi_turn_detected": _multi_turn_detected,
+        "multi_turn_boost": _multi_turn_boost,
+        "multi_turn_window": list(_ctx),
         "agent_action": agent_decision.get("action"),
         "agent_plugin": agent_decision.get("plugin"),
         "agent_params": agent_decision.get("parameters"),
@@ -1471,6 +1512,110 @@ if st.session_state.decision_history:
             "Cosmos DB":  "OK" if d["cosmos_logged"] else "Local",
         })
     st.dataframe(rows, use_container_width=True, height=300)
+
+
+# ================================================================
+# AGENT REPUTATION LEADERBOARD
+# ================================================================
+st.divider()
+st.markdown("## Agent Reputation")
+st.markdown("Persistent trust scores across all sessions. Loaded from Cosmos DB on start, updated in real time.")
+
+def _render_reputation_leaderboard():
+    tracker = st.session_state.reputation_tracker
+
+    # Collect agents seen in recent Cosmos decisions (cross-session)
+    recent = services["cosmos"].get_recent_decisions(limit=200)
+    cosmos_agent_ids = {r.get("agent_id") for r in recent if r.get("agent_id")}
+
+    # Also include any agents seen in this session
+    session_agent_ids = {d.get("agent_id") for d in st.session_state.decision_history if d.get("agent_id")}
+
+    all_agent_ids = cosmos_agent_ids | session_agent_ids
+
+    if not all_agent_ids:
+        st.info("No agents recorded yet. Run a request to start tracking reputation.")
+        return
+
+    rows = []
+    for aid in all_agent_ids:
+        info = tracker.get_trust_level(aid)
+        score = info["score"]
+
+        # Trust level badge styling
+        trust_color = info["color"]
+        trust_label = info["label"]
+
+        # Score bar (filled out of 100)
+        bar_filled = int(score)
+        bar_empty  = 100 - bar_filled
+        bar_html = (
+            f'<div style="display:flex;align-items:center;gap:8px;">'
+            f'<div style="flex:1;background:#1a1a1a;height:6px;border:1px solid #333;">'
+            f'<div style="width:{bar_filled}%;height:100%;background:{trust_color};"></div>'
+            f'</div>'
+            f'<span style="font-size:.7rem;color:#fff;min-width:32px;">{score:.0f}</span>'
+            f'</div>'
+        )
+
+        rows.append({
+            "Agent ID":      aid,
+            "Score":         score,
+            "Trust Level":   trust_label,
+            "Decisions":     info["request_count"],
+            "Blocks":        info["block_count"],
+            "Escalations":   info.get("escalation_count", 0),
+        })
+
+    # Sort by score ascending (most risky agents first = lowest score at top)
+    rows.sort(key=lambda r: r["Score"])
+
+    # Add rank
+    for i, r in enumerate(rows, 1):
+        r["Rank"] = f"#{i}"
+
+    # Reorder columns for display
+    display_rows = [
+        {
+            "Rank":        r["Rank"],
+            "Agent ID":    r["Agent ID"],
+            "Score":       r["Score"],
+            "Trust Level": r["Trust Level"],
+            "Decisions":   r["Decisions"],
+            "Blocks":      r["Blocks"],
+            "Escalations": r["Escalations"],
+        }
+        for r in rows
+    ]
+
+    st.dataframe(display_rows, use_container_width=True, height=min(60 + 35 * len(display_rows), 400))
+
+    # Score history for selected agent
+    all_ids_sorted = [r["Agent ID"] for r in rows]
+    if all_ids_sorted:
+        st.markdown('<div class="section-tag" style="margin-top:1rem;">Score History</div>', unsafe_allow_html=True)
+        selected_agent = st.selectbox(
+            "View score history for agent:",
+            all_ids_sorted,
+            key="rep_history_agent",
+            label_visibility="collapsed",
+        )
+        history = tracker.get_trust_level(selected_agent).get("cosmos_history", [])
+        if history:
+            hist_rows = [
+                {
+                    "Time":     h.get("timestamp", "")[:19].replace("T", " "),
+                    "Before":   h.get("previous_score", "—"),
+                    "After":    h.get("new_score", "—"),
+                    "Reason":   h.get("reason", "—"),
+                }
+                for h in history
+            ]
+            st.dataframe(hist_rows, use_container_width=True, height=min(60 + 35 * len(hist_rows), 300))
+        else:
+            st.caption("No history yet for this agent in this session.")
+
+_wrap_fragment(_render_reputation_leaderboard)()
 
 
 # ================================================================

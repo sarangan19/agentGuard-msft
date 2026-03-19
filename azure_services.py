@@ -211,6 +211,39 @@ class CosmosDBService:
             return []
 
     # ----------------------------------------------------------
+    def get_reputation(self, agent_id: str) -> dict | None:
+        """
+        Fetch the persisted reputation document for an agent.
+        Returns None if not found or Cosmos is unavailable.
+        """
+        if self.container is None:
+            return None
+        try:
+            item = self.container.read_item(
+                item=f"rep_{agent_id}",
+                partition_key="__reputation__",
+            )
+            return item
+        except Exception:
+            # NotFoundException or any other error → treat as not found
+            return None
+
+    # ----------------------------------------------------------
+    def upsert_reputation(self, doc: dict) -> bool:
+        """
+        Write or update a reputation document.
+        Returns True on success, False on failure.
+        """
+        if self.container is None:
+            return False
+        try:
+            self.container.upsert_item(doc)
+            return True
+        except Exception as exc:
+            logger.error("CosmosDB upsert_reputation error: %s", exc)
+            return False
+
+    # ----------------------------------------------------------
     def test_connection(self) -> dict:
         """Quick connectivity test — reads database properties."""
         if self.container is None:
