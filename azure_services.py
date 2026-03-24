@@ -201,7 +201,7 @@ class CosmosDBService:
         try:
             items = list(
                 self.container.query_items(
-                    query=f"SELECT TOP {limit} * FROM c ORDER BY c._ts DESC",
+                    query=f"SELECT TOP {limit} * FROM c WHERE IS_DEFINED(c.tier) ORDER BY c._ts DESC",
                     enable_cross_partition_query=True,
                 )
             )
@@ -227,6 +227,29 @@ class CosmosDBService:
         except Exception:
             # NotFoundException or any other error → treat as not found
             return None
+
+    # ----------------------------------------------------------
+    def confirm_decision(self, record_id: str, session_id: str, justification: str = "") -> bool:
+        """
+        Mark an audit decision as human-confirmed.
+        Fetches the existing record, stamps intervention_confirmed=True,
+        stores any justification text, then re-upserts the full document.
+        Returns True on success, False on failure (record not found, Cosmos unavailable).
+        """
+        if self.container is None:
+            return False
+        try:
+            record = self.container.read_item(item=record_id, partition_key=session_id)
+            record["intervention_confirmed"] = True
+            record["intervention_timestamp"] = datetime.now(timezone.utc).isoformat()
+            if justification:
+                record["justification"] = justification.strip()
+            self.container.upsert_item(record)
+            logger.debug("Cosmos confirm_decision OK: id=%s", record_id)
+            return True
+        except Exception as exc:
+            logger.error("CosmosDB confirm_decision error: %s", exc)
+            return False
 
     # ----------------------------------------------------------
     def upsert_reputation(self, doc: dict) -> bool:

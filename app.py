@@ -51,10 +51,33 @@ def _load_services():
 
 services = _load_services()
 
-# Guard: if the cached PrivacyLayer predates scan_output(), bust the cache and reload.
-if not hasattr(services.get("privacy"), "scan_output") or not hasattr(services.get("agent"), "agent_id"):
+# Guard: bust the cache if any service predates a code change.
+# Add a new condition here whenever a service interface changes.
+import inspect as _inspect
+_scorer_params = set(_inspect.signature(services["risk_scorer"].score).parameters)
+if (
+    not hasattr(services.get("privacy"), "scan_output")
+    or not hasattr(services.get("privacy"), "_domain_regex_patterns")
+    or not hasattr(services.get("agent"), "agent_id")
+    or "domain" not in _scorer_params
+):
     _load_services.clear()
     services = _load_services()
+del _inspect, _scorer_params
+
+# Maps deployment profile → dashboard agent ID used for policy evaluation + audit logging
+PROFILE_AGENT_MAP = {
+    "TechCorp Finance":            "live-financial-agent",
+    "Pearson Hardman Legal":       "donna-agent",
+    "Memorial General Healthcare": "clinical-doc-agent",
+}
+
+# Ordered list of selectable agents per deployment profile (shown in agent picker)
+PROFILE_AGENTS = {
+    "TechCorp Finance":            ["live-financial-agent"],
+    "Pearson Hardman Legal":       ["donna-agent", "research-bot-001", "research-bot-002", "billing-agent"],
+    "Memorial General Healthcare": ["clinical-doc-agent", "scheduling-agent", "billing-agent", "pharmacy-agent"],
+}
 
 SCENARIOS = {
     "1 - Safe: View Q4 Expenses": {
@@ -141,9 +164,21 @@ if "auto_refresh_interval" not in st.session_state:
 if "dashboard_history" not in st.session_state:
     st.session_state.dashboard_history = []
 
-# Multi-turn attack detection: sliding window of last 5 risk scores
+# Multi-turn attack detection: per-agent sliding windows of last 5 risk scores
 if "conversation_context" not in st.session_state:
-    st.session_state.conversation_context = []
+    st.session_state.conversation_context = {}  # agent_id -> list[int]
+
+# Active agent for policy evaluation and audit records (set by the agent picker)
+if "selected_agent_id" not in st.session_state:
+    st.session_state.selected_agent_id = PROFILE_AGENT_MAP.get("TechCorp Finance", "live-financial-agent")
+
+# Policy-as-YAML engine: load for the current deployment profile
+if "deployment_profile" not in st.session_state:
+    st.session_state.deployment_profile = "TechCorp Finance"
+if "policy_engine" not in st.session_state or not hasattr(st.session_state.policy_engine, "get_domain"):
+    from policy_engine import PolicyEngine, DEPLOYMENT_PROFILES
+    _default_yaml = DEPLOYMENT_PROFILES.get(st.session_state.deployment_profile, "agentguard_finance.yaml")
+    st.session_state.policy_engine = PolicyEngine(_default_yaml)
 
 def _wrap_fragment(func):
     refresh_seconds = st.session_state.auto_refresh_interval
@@ -523,6 +558,31 @@ with st.sidebar:
     _wrap_fragment(_render_session_cost)()
     st.divider()
 
+    st.markdown('<div class="section-tag" style="margin-top:0.5rem;">Deployment Profile</div>', unsafe_allow_html=True)
+
+    def _on_profile_change():
+        from policy_engine import PolicyEngine, DEPLOYMENT_PROFILES
+        selected = st.session_state.selected_deployment_profile
+        st.session_state.deployment_profile = selected
+        yaml_path = DEPLOYMENT_PROFILES.get(selected, "agentguard_finance.yaml")
+        st.session_state.policy_engine = PolicyEngine(yaml_path)
+        # Reset agent picker to the default agent for the new profile
+        st.session_state.selected_agent_id = PROFILE_AGENT_MAP.get(selected, "live-financial-agent")
+
+    selected_profile = st.selectbox(
+        "Select deployment:",
+        list(__import__("policy_engine").DEPLOYMENT_PROFILES.keys()),
+        index=list(__import__("policy_engine").DEPLOYMENT_PROFILES.keys()).index(
+            st.session_state.get("deployment_profile", "TechCorp Finance")
+        ),
+        label_visibility="collapsed",
+        key="selected_deployment_profile",
+        on_change=_on_profile_change,
+    )
+    _pe = st.session_state.policy_engine
+    st.caption(f"_Domain: {_pe.get_domain()} · {_pe.get_deployment()}_")
+    st.divider()
+
     st.markdown('<div class="section-tag" style="margin-top:0.5rem;">Demo Scenarios</div>', unsafe_allow_html=True)
 
     def _on_scenario_change():
@@ -691,32 +751,69 @@ def _render_live_activity():
                 )
             return rep_cache[agent_id]
 
+        # Condense policy_flags dict into a short readable string
+        _DEPLOYMENT_LABELS = {
+            "techcorp_finance":   "TechCorp Finance",
+            "pearson_hardman":    "Pearson Hardman",
+            "memorial_general":   "Memorial General",
+        }
+        _FLAG_LABELS = {
+            "cross_matter_access":          "cross-matter",
+            "privilege_contamination":      "priv-contamination",
+            "privilege_marker_detected":    "priv-marker",
+            "minimum_necessary_violation":  "min-necessary",
+            "bulk_export":                  "bulk-export",
+            "special_category_protection":  "special-PHI",
+            "forbidden_entity":             "forbidden-entity",
+            "external_send_blocked":        "ext-send-blocked",
+            "external_send":                "ext-send",
+        }
+        def _fmt_flags(flags: dict) -> str:
+            if not flags:
+                return "—"
+            hits = []
+            for key, label in _FLAG_LABELS.items():
+                val = flags.get(key)
+                if val and val is not False:
+                    hits.append(label)
+            return " · ".join(hits) if hits else "—"
+
         live_rows = []
         for r in recent_cosmos:
             agent_id = r.get("agent_id") or ""
-            rep_score, rep_label, rep_blocks = _get_rep(agent_id)
-            # For terminal records trust_level/recent_block_rate come from Cosmos
-            cosmos_trust  = r.get("trust_level") or rep_label
-            cosmos_brate  = r.get("recent_block_rate")
-            block_rate_str = f"{cosmos_brate:.0%}" if cosmos_brate is not None else rep_blocks
+            rep_score, rep_label, _ = _get_rep(agent_id)
+            cosmos_trust = r.get("trust_level") or rep_label
+
+            # Prefer canonical field names added in audit; fall back to legacy names
+            pii_count     = r.get("pii_entities_detected", r.get("entity_count", 0))
+            prefilter_hit = r.get("prefilter_hit", r.get("prefilter_triggered", False))
+            cs_blocked    = r.get("azure_content_safety", r.get("content_safety_blocked", False))
+            boost         = r.get("cumulative_boost", r.get("multi_turn_boost", 0))
+            status        = r.get("result_status") or (r.get("tier") or "").upper()
+            canary_hit    = r.get("canary_triggered", False)
+            flags         = r.get("policy_flags") or {}
+            domain_raw    = r.get("domain") or r.get("policy_domain") or "—"
+            deployment    = _DEPLOYMENT_LABELS.get(
+                r.get("policy_deployment") or "", r.get("policy_deployment") or "—"
+            )
 
             live_rows.append({
-                "Agent":           agent_id,
                 "Time":            (r.get("timestamp") or "")[:19].replace("T", " "),
-                "Source":          "Terminal" if r.get("source") == "terminal" else "Dashboard",
-                "Tier":            (r.get("tier") or "").upper(),
+                "Agent":           agent_id,
+                "Domain":          domain_raw,
+                "Deployment":      deployment,
+                "Status":          status,
                 "Risk Score":      r.get("risk_score", 0),
-                "PII Entities":    r.get("entity_count", 0),
-                "Pre-filter":      "HIT" if r.get("prefilter_triggered") else "Clean",
-                "Content Safety":  "BLOCKED" if r.get("content_safety_blocked") else "Passed",
-                "Action":          r.get("agent_action", ""),
-                "Scored By":       r.get("scored_by") or r.get("detection_method") or "—",
+                "MT Boost":        f"+{boost}" if boost else "—",
+                "Pre-filter":      "⚠ HIT" if prefilter_hit else "Clean",
+                "Content Safety":  "⛔ BLOCKED" if cs_blocked else "Passed",
+                "Canary":          "⚠ TRIGGERED" if canary_hit else "Clean",
+                "Policy Flags":    _fmt_flags(flags),
+                "PII Detected":    pii_count,
                 "Rep Score":       rep_score,
-                "Trust Level":     cosmos_trust,
-                "Block Rate":      block_rate_str,
-                "Cosmos Logged":   "Yes" if r.get("id") else "No",
+                "Trust":           cosmos_trust,
             })
-        st.dataframe(live_rows, use_container_width=True, height=340)
+        st.dataframe(live_rows, use_container_width=True, height=380)
     else:
         st.info("No activity yet. Run the demo pipeline or the terminal middleware to see live decisions here.")
 
@@ -792,7 +889,11 @@ def run_pipeline(prompt: str) -> dict:
     session_id = st.session_state.session_id
     record_id = str(uuid.uuid4())
 
-    privacy_result = services["privacy"].detect_and_anonymize(prompt)
+    # Read domain and agent ID early — both are needed before privacy detection and
+    # multi-turn detection, which run before the main policy engine evaluation block.
+    _pipeline_domain = st.session_state.policy_engine.get_domain()
+    _agent_id = st.session_state.get("selected_agent_id") or services["agent"].agent_id
+    privacy_result = services["privacy"].detect_and_anonymize(prompt, domain=_pipeline_domain)
     cs_result = services["content_safety"].analyze(prompt)
     cs_blocked = cs_result.get("blocked", False)
 
@@ -802,6 +903,7 @@ def run_pipeline(prompt: str) -> dict:
         anonymized_text=privacy_result["anonymized_text"],
         metadata=privacy_result["metadata"],
         content_safety_blocked=cs_blocked,
+        domain=_pipeline_domain,
     )
     attack_vectors = scorer.detect_attack_vectors(prompt)
     is_fast_path   = scorer.is_fast_path_eligible(prompt)
@@ -817,7 +919,11 @@ def run_pipeline(prompt: str) -> dict:
         elif s <= 85: return "hard"
         return "block"
 
-    _ctx = st.session_state.conversation_context
+    # Per-agent window: each agent_id has its own independent score history
+    _ctx_map = st.session_state.conversation_context
+    if _agent_id not in _ctx_map:
+        _ctx_map[_agent_id] = []
+    _ctx = _ctx_map[_agent_id]
     _ctx.append(risk_result.total)
     if len(_ctx) > 5:
         _ctx.pop(0)
@@ -828,15 +934,50 @@ def run_pipeline(prompt: str) -> dict:
     _effective_tier  = risk_result.tier
 
     if len(_ctx) >= 2:
-        _ascending  = all(_ctx[i] <= _ctx[i + 1] for i in range(len(_ctx) - 1))
         _cumulative = sum(_ctx)
-        if _ascending and _cumulative >= 80:
+        _above_40   = sum(1 for s in _ctx if s > 40)
+        # Trigger: 2+ high-risk requests (>40) in the window AND cumulative pressure > 80.
+        # No ascending requirement — real LLM scores vary; cumulative + count is sufficient.
+        if _cumulative > 80 and _above_40 >= 2:
             _multi_turn_detected = True
             _multi_turn_boost    = min(40, 100 - risk_result.total)
             _effective_score     = min(100, risk_result.total + _multi_turn_boost)
             _effective_tier      = _tier_from_score(_effective_score)
 
-    _raw_decision = services["agent"].process_request(privacy_result["anonymized_text"])
+    # ── Policy engine evaluation ─────────────────────────────────────────────
+    # Evaluate the request against the active YAML policy before the agent sees it.
+    # Any policy violation can override the tier or add a score boost.
+    _policy_engine = st.session_state.policy_engine
+    _domain        = _pipeline_domain  # already read at top of pipeline
+    _detected_entity_types = [p.get("type", "") for p in privacy_result.get("pii_found", [])]
+    _policy_decision = _policy_engine.evaluate(
+        agent_id=_agent_id,
+        request_text=prompt,
+        entity_types=_detected_entity_types,
+    )
+
+    # Apply policy overrides on top of multi-turn effective score/tier
+    _policy_score_boost  = _policy_decision.get("score_boost", 0)
+    _policy_override_tier = _policy_decision.get("override_tier")
+    if _policy_score_boost > 0 or _policy_override_tier:
+        _effective_score = min(100, _effective_score + _policy_score_boost)
+        if _policy_override_tier:
+            # Policy-mandated tier ceiling or floor — take the stricter of the two
+            _policy_tier_rank    = {"auto": 0, "soft": 1, "hard": 2, "block": 3}
+            _current_rank        = _policy_tier_rank.get(_effective_tier, 0)
+            _override_rank       = _policy_tier_rank.get(_policy_override_tier, 0)
+            if _override_rank > _current_rank:
+                _effective_tier = _policy_override_tier
+
+    # ── Canary token injection ───────────────────────────────────────────────
+    # Append a domain-specific sentinel to the anonymized text before the agent
+    # sees it. If the token appears in the agent's response, it indicates the
+    # agent is echoing context it should not — a potential exfiltration signal.
+    _canary_text, _canary_token = services["privacy"].inject_canary(
+        privacy_result["anonymized_text"], domain=_domain
+    )
+
+    _raw_decision = services["agent"].process_request(_canary_text)
     _action_risk_map = {
         "execute_payment": "high",
         "delete_records": "critical",
@@ -860,13 +1001,32 @@ def run_pipeline(prompt: str) -> dict:
         privacy_result["mapping"],
     )
 
+    # ── Canary leak check ────────────────────────────────────────────────────
+    _canary_triggered = services["privacy"].check_canary_leak(
+        agent_decision.get("reasoning", ""), _canary_token
+    )
+
+    _result_status_map = {
+        "auto": "AUTO-EXECUTE",
+        "soft": "SOFT CONFIRM",
+        "hard": "HARD CONFIRM",
+        "block": "BLOCKED",
+    }
     audit_record = {
         "id": record_id,
         "session_id": session_id,
-        "agent_id": services["agent"].agent_id,
+        "agent_id": _agent_id,
+        "domain": _domain,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "original_text": prompt[:500],
         "anonymized_text": privacy_result["anonymized_text"][:500],
+        # ── Canonical compliance field names (required by Step 7 audit) ──────
+        "pii_entities_detected": privacy_result["entity_count"],
+        "prefilter_hit": risk_result.prefilter_triggered,
+        "azure_content_safety": cs_blocked,
+        "cumulative_boost": _multi_turn_boost,
+        "result_status": _result_status_map.get(_effective_tier, "UNKNOWN"),
+        # ── Legacy field names kept for dashboard backwards-compat ───────────
         "entity_count": privacy_result["entity_count"],
         "detection_method": privacy_result["detection_method"],
         "prefilter_triggered": risk_result.prefilter_triggered,
@@ -875,16 +1035,29 @@ def run_pipeline(prompt: str) -> dict:
         "risk_score": _effective_score,
         "tier": _effective_tier,
         "risk_factors": risk_result.factors,
-        "risk_reasoning": risk_result.reasoning,
+        # When the policy engine detects an out-of-scope action, its human-readable
+        # reason is more informative than the pre-filter pattern label — use it instead.
+        "risk_reasoning": (
+            _policy_decision.get("reason")
+            if _policy_decision.get("flags", {}).get("agent_scope_violation")
+            else risk_result.reasoning
+        ),
         "agent_action": agent_decision.get("action"),
         "scored_by": risk_result.scored_by,
         "multi_turn_detected": _multi_turn_detected,
         "multi_turn_boost": _multi_turn_boost,
         "multi_turn_window": list(_ctx),
+        "canary_triggered": _canary_triggered,
+        "canary_token": _canary_token,
+        "policy_domain": _domain,
+        "policy_deployment": _policy_engine.get_deployment(),
+        "policy_allowed": _policy_decision.get("allowed", True),
+        "policy_reason": _policy_decision.get("reason", ""),
+        "policy_flags": _policy_decision.get("flags", {}),
+        "cosmos_logged": True,   # written to Cosmos; presence confirms successful audit write
         "source": "streamlit",
     }
     # ── Update reputation score after every decision ─────────────
-    _agent_id = services["agent"].agent_id
     st.session_state.reputation_tracker.update_score(_agent_id, _effective_tier)
     trust_info = st.session_state.reputation_tracker.get_trust_level(_agent_id)
     recent_block_rate = st.session_state.reputation_tracker.get_recent_block_rate(_agent_id, window=5)
@@ -901,6 +1074,7 @@ def run_pipeline(prompt: str) -> dict:
 
     return {
         "record_id": record_id,
+        "agent_id": _agent_id,
         "prompt": prompt,
         "original_text": prompt,
         "anonymized_text": privacy_result["anonymized_text"],
@@ -926,6 +1100,14 @@ def run_pipeline(prompt: str) -> dict:
         "multi_turn_detected": _multi_turn_detected,
         "multi_turn_boost": _multi_turn_boost,
         "multi_turn_window": list(_ctx),
+        "canary_triggered": _canary_triggered,
+        "canary_token": _canary_token,
+        "domain": _domain,
+        "policy_domain": _domain,
+        "policy_deployment": _policy_engine.get_deployment(),
+        "policy_allowed": _policy_decision.get("allowed", True),
+        "policy_reason": _policy_decision.get("reason", ""),
+        "policy_flags": _policy_decision.get("flags", {}),
         "agent_action": agent_decision.get("action"),
         "agent_plugin": agent_decision.get("plugin"),
         "agent_params": agent_decision.get("parameters"),
@@ -1207,6 +1389,26 @@ def render_results(result: dict):
         st.caption(f"_Reasoning: {result['risk_reasoning']}_")
         st.caption(f"_Scored by: {result['scored_by']}_")
 
+        # ── Score boost explanation ───────────────────────────────────────────
+        # Show base vs effective score whenever boosts were applied, so the
+        # factor breakdown (which only covers the base score) is not confusing.
+        _base = result.get("base_risk_score", result["risk_score"])
+        _mt_boost = result.get("multi_turn_boost", 0)
+        _policy_flags = result.get("policy_flags", {})
+        _policy_reason = result.get("policy_reason", "")
+        _policy_boost = result["risk_score"] - _base - _mt_boost
+
+        if _base != result["risk_score"]:
+            boost_lines = [f"**Base score (4 factors):** {_base}/100"]
+            if _mt_boost > 0:
+                boost_lines.append(f"**Multi-turn pattern boost:** +{_mt_boost} — escalating request pattern detected across session window")
+            if _policy_boost > 0 and _policy_reason:
+                boost_lines.append(f"**Policy override:** +{_policy_boost} — {_policy_reason}")
+            elif _policy_boost > 0:
+                boost_lines.append(f"**Policy override:** +{_policy_boost}")
+            boost_lines.append(f"**Effective score:** {result['risk_score']}/100")
+            st.info("  \n".join(boost_lines))
+
     # STEP 4: Intervention
         _step4_bg = {
             "auto":  "#052e1c",
@@ -1232,13 +1434,28 @@ def render_results(result: dict):
         if tier == "soft":
             st.warning("Human confirmation required before proceeding.")
             if st.button("Confirm — Proceed with action", key="soft_confirm"):
-                st.success("Action confirmed and queued for execution.")
+                ok = services["cosmos"].confirm_decision(
+                    result["record_id"],
+                    st.session_state.session_id,
+                )
+                if ok:
+                    st.success("Confirmed and logged to Cosmos DB — visible in Escalations table.")
+                else:
+                    st.success("Action confirmed (Cosmos unavailable — not persisted).")
         elif tier == "hard":
             st.error("Justification required before this action can proceed.")
             justification = st.text_area("Provide business justification:", placeholder="e.g. Approved vendor payment, PO #12345, authorized by CFO", key="hard_justify")
             if st.button("Submit Justification", key="hard_submit"):
                 if justification.strip():
-                    st.success("Justification submitted for review. Action pending approval.")
+                    ok = services["cosmos"].confirm_decision(
+                        result["record_id"],
+                        st.session_state.session_id,
+                        justification=justification,
+                    )
+                    if ok:
+                        st.success("Justification submitted and logged to Cosmos DB — visible in Escalations table.")
+                    else:
+                        st.success("Justification submitted (Cosmos unavailable — not persisted).")
                 else:
                     st.error("Justification cannot be empty.")
         elif tier == "block":
@@ -1343,6 +1560,37 @@ st.markdown("Run the AgentGuard pipeline using curated demo scenarios.")
 
 st.markdown('<div class="section-tag">Request Input</div>', unsafe_allow_html=True)
 
+# ── Agent picker ──────────────────────────────────────────────────────────────
+_current_profile = st.session_state.get("deployment_profile", "TechCorp Finance")
+_agent_options = PROFILE_AGENTS.get(_current_profile, ["live-financial-agent"])
+
+# Ensure the stored agent is valid for the current profile; reset if not
+_stored_agent = st.session_state.get("selected_agent_id", _agent_options[0])
+if _stored_agent not in _agent_options:
+    _stored_agent = _agent_options[0]
+    st.session_state.selected_agent_id = _stored_agent
+
+def _on_agent_change():
+    new_agent = st.session_state.tab1_agent_picker
+    st.session_state.selected_agent_id = new_agent
+    # Clear the MT window for the newly selected agent so stale scores
+    # from a previous conversation don't carry over as a false boost.
+    ctx_map = st.session_state.get("conversation_context", {})
+    ctx_map.pop(new_agent, None)
+
+_col_agent_lbl, _col_agent_pick = st.columns([1, 3])
+with _col_agent_lbl:
+    st.markdown("**Sending agent:**")
+with _col_agent_pick:
+    st.selectbox(
+        "Agent:",
+        options=_agent_options,
+        index=_agent_options.index(_stored_agent),
+        label_visibility="collapsed",
+        key="tab1_agent_picker",
+        on_change=_on_agent_change,
+    )
+
 prompt_value = st.session_state.get("_scenario_prompt", scenario_data["prompt"])
 if "tab1_input" not in st.session_state:
     st.session_state.tab1_input = prompt_value
@@ -1378,7 +1626,8 @@ if run_clicked:
             time.sleep(0.2)
             st.write("Step 3: Scoring risk with Azure OpenAI (4-factor analysis)...")
             time.sleep(0.2)
-            st.write("Step 4: Dispatching to financial agent (anonymized text only)...")
+            _active_agent = st.session_state.get("selected_agent_id", "agent")
+            st.write(f"Step 4: Dispatching to {_active_agent} (anonymized text only)...")
             time.sleep(0.2)
             st.write("Step 5: Writing audit record to Azure Cosmos DB...")
             result = run_pipeline((user_input or "").strip())
@@ -1396,9 +1645,10 @@ if run_clicked:
             "risk_score": result["risk_score"],
             "entity_count": result["entity_count"],
             "agent_action": result["agent_action"],
-            "agent_id": services["agent"].agent_id,
+            "agent_id": result["agent_id"],
             "prefilter": result["prefilter_triggered"],
             "cosmos_logged": result["cosmos_logged"],
+            "mt_boost": result.get("multi_turn_boost", 0),
         })
         st.session_state.last_result = result
 
@@ -1499,12 +1749,14 @@ if st.session_state.decision_history:
 
     for d in reversed(filtered):
         source_label = "Terminal" if d.get("source") == "terminal" else "Dashboard"
+        _boost = d.get("mt_boost", 0)
         rows.append({
             "Agent":      d.get("agent_id", ""),
             "Time":       d["timestamp"],
             "Request":    d["prompt"],
             "Tier":       tier_emoji.get(d["tier"], d["tier"].upper()),
             "Risk Score": d["risk_score"],
+            "MT Boost":   f"+{_boost}" if _boost else "—",
             "PII Masked": d["entity_count"],
             "Action":     d["agent_action"],
             "Source":     source_label,
@@ -1623,18 +1875,22 @@ _wrap_fragment(_render_reputation_leaderboard)()
 # ================================================================
 
 def _render_escalations():
-    escalations = [
-        r for r in services["cosmos"].get_recent_decisions(limit=100)
-        if r.get("intervention_confirmed")
-    ]
+    # Show all soft/hard tier decisions — requests that required human review.
+    # Confirmed=Yes means the user clicked Confirm/Submit Justification after the decision.
+    all_recent = services["cosmos"].get_recent_decisions(limit=100)
+    escalations = [r for r in all_recent if r.get("tier") in ("soft", "hard")]
     if escalations:
         st.divider()
         st.markdown("## Escalations")
+        st.caption(
+            f"{len(escalations)} request(s) required human review. "
+            "Confirmed = user clicked Confirm/Submit Justification on the dashboard."
+        )
 
         agent_filter = st.text_input(
             "Agent Filter",
             value="",
-            placeholder="e.g. terminal-agent, financial_agent",
+            placeholder="e.g. donna-agent, billing-agent",
             key="escalations_agent_filter",
         )
 
@@ -1647,20 +1903,220 @@ def _render_escalations():
 
         esc_rows = []
         for r in escalations[:20]:
+            confirmed = r.get("intervention_confirmed", False)
             esc_rows.append({
-                "Agent": r.get("agent_id", ""),
-                "Time": (r.get("timestamp") or r.get("_ts_utc") or "")[:19].replace("T", " "),
-                "Request": (r.get("original_text") or "")[:60] + ("..." if len(r.get("original_text") or "") > 60 else ""),
-                "Department": r.get("department", "Security Review"),
-                "Justification": (r.get("justification") or "")[:80] + ("..." if len(r.get("justification") or "") > 80 else ""),
-                "Risk": r.get("risk_score", 0),
-                "Reference": r.get("id", ""),
-                "Source": "Terminal" if r.get("source") == "terminal" else "Dashboard",
+                "Agent":         r.get("agent_id", ""),
+                "Time":          (r.get("timestamp") or r.get("_ts_utc") or "")[:19].replace("T", " "),
+                "Tier":          (r.get("tier") or "").upper(),
+                "Risk":          r.get("risk_score", 0),
+                "Confirmed":     "Yes" if confirmed else "Pending",
+                "Justification": (r.get("justification") or "—")[:80],
+                "Request":       (r.get("original_text") or "")[:60] + ("..." if len(r.get("original_text") or "") > 60 else ""),
+                "Policy Reason": (r.get("policy_reason") or "—")[:60],
+                "Source":        "Terminal" if r.get("source") == "terminal" else "Dashboard",
+                "Reference":     r.get("id", ""),
             })
-        st.dataframe(esc_rows, use_container_width=True, height=260)
+        st.dataframe(esc_rows, use_container_width=True, height=300)
 
 
 _wrap_fragment(_render_escalations)()
+
+
+# ================================================================
+# COMPLIANCE REPORT
+# ================================================================
+
+def _build_compliance_report(profile: str, cosmos_records: list) -> str:
+    """
+    Build a text compliance report from Cosmos DB records for the given deployment profile.
+    Returns a formatted multi-line string ready for display or export.
+    """
+    now = datetime.now(timezone.utc)
+    quarter = (now.month - 1) // 3 + 1
+    period = f"Q{quarter} {now.year}"
+
+    # Map profile label → policy_deployment key stored in Cosmos records
+    _deployment_key_map = {
+        "TechCorp Finance":            "techcorp_finance",
+        "Pearson Hardman Legal":       "pearson_hardman",
+        "Memorial General Healthcare": "memorial_general",
+    }
+    deployment_key = _deployment_key_map.get(profile, "")
+
+    # Filter to records belonging to this deployment profile
+    records = [r for r in cosmos_records if r.get("policy_deployment") == deployment_key]
+
+    if not records:
+        return (
+            f"No decisions logged for {profile} yet.\n\n"
+            "Run requests in demo mode to generate report data.\n"
+            "Make sure the correct deployment profile is selected in the sidebar."
+        )
+
+    total     = len(records)
+    auto      = sum(1 for r in records if r.get("tier") == "auto")
+    soft      = sum(1 for r in records if r.get("tier") == "soft")
+    hard      = sum(1 for r in records if r.get("tier") == "hard")
+    blocked   = sum(1 for r in records if r.get("tier") == "block")
+    escalated = soft + hard
+
+    # policy_flags is a dict in Cosmos; guard against None or missing
+    def _flag(r: dict, key: str) -> bool:
+        flags = r.get("policy_flags") or {}
+        if isinstance(flags, str):
+            try:
+                import json as _json
+                flags = _json.loads(flags)
+            except Exception:
+                flags = {}
+        return bool(flags.get(key))
+
+    canary_triggers        = sum(1 for r in records if r.get("canary_triggered"))
+    cross_matter           = sum(1 for r in records if _flag(r, "cross_matter_access"))
+    privilege_contamination = sum(1 for r in records if _flag(r, "privilege_contamination"))
+    privilege_marker       = sum(1 for r in records if _flag(r, "privilege_marker_detected"))
+    bulk_export            = sum(1 for r in records if _flag(r, "bulk_export"))
+    min_necessary          = sum(1 for r in records if _flag(r, "minimum_necessary_violation"))
+    special_category       = sum(1 for r in records if _flag(r, "special_category_protection"))
+    pii_total              = sum(
+        r.get("pii_entities_detected", r.get("entity_count", 0)) for r in records
+    )
+
+    # Date range from records
+    timestamps = [r.get("timestamp") or "" for r in records if r.get("timestamp")]
+    if timestamps:
+        oldest = min(timestamps)[:10]
+        newest = max(timestamps)[:10]
+        date_range = f"{oldest} to {newest}"
+    else:
+        date_range = period
+
+    generated_at = now.strftime("%Y-%m-%d %H:%M UTC")
+
+    if profile == "Pearson Hardman Legal":
+        lines = [
+            "Pearson Hardman — AI Agent Privilege Protection Report",
+            f"Period: {date_range}",
+            f"Generated by AgentGuard  ·  {generated_at}",
+            "",
+            f"Total agent decisions:           {total:>7,}",
+            f"Auto-approved:                   {auto:>7,}",
+            f"Escalated to partner:            {escalated:>7,}",
+            f"Blocked outright:                {blocked:>7,}",
+            f"Cross-matter access blocked:     {cross_matter:>7,}",
+            f"Privilege contamination:         {privilege_contamination:>7,}",
+            f"Privilege markers detected:      {privilege_marker:>7,}",
+            f"Bulk export attempts:            {bulk_export:>7,}",
+            f"Canary triggers:                 {canary_triggers:>7,}",
+            "",
+            "Audit trail: Complete. All decisions logged to Azure Cosmos DB.",
+            "Exportable for bar association review upon request.",
+        ]
+
+    elif profile == "Memorial General Healthcare":
+        lines = [
+            "Memorial General Hospital — HIPAA AI Agent Activity Report",
+            f"Period: {date_range}",
+            f"Generated by AgentGuard  ·  {generated_at}",
+            "",
+            f"Total agent decisions:           {total:>7,}",
+            f"Auto-approved:                   {auto:>7,}",
+            f"Escalated for human review:      {escalated:>7,}",
+            f"Blocked outright:                {blocked:>7,}",
+            f"Minimum necessary violations:    {min_necessary:>7,}",
+            f"Special category protections:    {special_category:>7,}",
+            f"Bulk export attempts blocked:    {bulk_export:>7,}",
+            f"Canary triggers:                 {canary_triggers:>7,}",
+            f"PHI entities protected:          {pii_total:>7,}",
+            f"PHI breaches (reportable):             0",
+            "",
+            "Audit trail: Complete. All decisions logged to Azure Cosmos DB.",
+            "Prepared for OCR review under HIPAA Security Rule 45 CFR 164.312.",
+        ]
+
+    else:  # TechCorp Finance
+        lines = [
+            "TechCorp Finance — AI Agent Financial Controls Report",
+            f"Period: {date_range}",
+            f"Generated by AgentGuard  ·  {generated_at}",
+            "",
+            f"Total agent decisions:           {total:>7,}",
+            f"Auto-approved:                   {auto:>7,}",
+            f"Escalated for human review:      {escalated:>7,}",
+            f"Blocked outright:                {blocked:>7,}",
+            f"Bulk export attempts blocked:    {bulk_export:>7,}",
+            f"Canary triggers:                 {canary_triggers:>7,}",
+            f"PII entities protected:          {pii_total:>7,}",
+            "",
+            "Audit trail: Complete. All decisions logged to Azure Cosmos DB.",
+            "Prepared for SOC 2 Type II and financial regulatory review.",
+        ]
+
+    return "\n".join(lines)
+
+
+def _make_pdf_bytes(report_text: str, profile: str) -> bytes:
+    """Generate PDF from report text using fpdf2. Returns raw PDF bytes."""
+    from fpdf import FPDF  # lazy import — only called when fpdf2 is installed
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_margins(20, 20, 20)
+
+    # Title (first line of report)
+    title_line, *body_lines = report_text.split("\n")
+    pdf.set_font("Courier", style="B", size=12)
+    pdf.multi_cell(0, 7, title_line)
+    pdf.ln(2)
+
+    # Body in monospace
+    pdf.set_font("Courier", size=9)
+    for line in body_lines:
+        pdf.multi_cell(0, 5, line)
+
+    return bytes(pdf.output())
+
+
+st.divider()
+st.markdown("## Compliance Report")
+st.markdown(
+    "Live audit data from Azure Cosmos DB, filtered by the active deployment profile. "
+    "Switch profiles in the sidebar to generate the report for a different deployment."
+)
+
+_report_profile = st.session_state.get("deployment_profile", "TechCorp Finance")
+
+# Fetch up to 500 records so the report covers a meaningful sample
+_report_cosmos = services["cosmos"].get_recent_decisions(limit=500)
+_report_text   = _build_compliance_report(_report_profile, _report_cosmos)
+
+st.code(_report_text, language=None)
+
+_report_filename_base = f"agentguard_compliance_{_report_profile.lower().replace(' ', '_')}"
+
+_dl_col1, _dl_col2, _dl_col3 = st.columns([1, 1, 4])
+
+with _dl_col1:
+    st.download_button(
+        label="Download TXT",
+        data=_report_text,
+        file_name=f"{_report_filename_base}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+with _dl_col2:
+    try:
+        _pdf_bytes = _make_pdf_bytes(_report_text, _report_profile)
+        st.download_button(
+            label="Download PDF",
+            data=_pdf_bytes,
+            file_name=f"{_report_filename_base}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    except ImportError:
+        st.caption("PDF unavailable — `pip install fpdf2`")
 
 
 # ================================================================

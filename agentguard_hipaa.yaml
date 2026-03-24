@@ -1,0 +1,177 @@
+# agentguard_hipaa.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# AgentGuard policy configuration — Memorial General Hospital
+# Domain: healthcare (HIPAA minimum necessary standard)
+# Agents: clinical-doc-agent, scheduling-agent, billing-agent, pharmacy-agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+deployment: memorial_general
+domain: healthcare
+audit_format: hipaa_compliant
+
+agents:
+  # Dashboard demo agent — behaves as a clinical documentation agent (attending physician scope)
+  dash_med_agent:
+    allowed_entities:
+      - PERSON
+      - MRN
+      - DIAGNOSIS
+      - LAB_RESULT
+      - DATE_OF_SERVICE
+      - ICD_CODE
+      - CPT_CODE
+    forbidden_entities:
+      - PSYCHIATRIC_MED
+      - HIV_STATUS
+      - HIV_MED
+      - SUBSTANCE_ABUSE
+      - SUBSTANCE_ABUSE_MED
+    special_category_override: attending_physician_only
+    bulk_access: block
+    requires_approval_for:
+      - action: export_data
+        always: true
+      - action: send_email
+        above_risk: 30
+
+  clinical-doc-agent:
+    # Treating physician access: clinical records for assigned patient panel
+    allowed_entities:
+      - PERSON
+      - MRN
+      - DIAGNOSIS
+      - LAB_RESULT
+      - DATE_OF_SERVICE
+      - ICD_CODE
+      - CPT_CODE
+
+    # Special category PHI is blocked unless treating physician overrides
+    forbidden_entities:
+      - PSYCHIATRIC_MED
+      - HIV_STATUS
+      - HIV_MED
+      - SUBSTANCE_ABUSE
+      - SUBSTANCE_ABUSE_MED
+
+    # Attending physician can request override for special category access
+    special_category_override: attending_physician_only
+
+    bulk_access: block
+
+    requires_approval_for:
+      - action: export_data
+        always: true
+      - action: send_email
+        above_risk: 30
+
+  scheduling-agent:
+    # Scheduling only — appointment logistics, never clinical
+    allowed_entities:
+      - PERSON
+      - PHONE
+      - DATE
+      - APPOINTMENT
+      - EMAIL
+
+    forbidden_entities:
+      - DIAGNOSIS
+      - MEDICATION
+      - LAB_RESULT
+      - MRN
+      - ICD_CODE
+      - CPT_CODE
+      - CLINICAL_NOTE
+      - PSYCHIATRIC_RECORD
+
+    # Any external communication from scheduling must be confirmed
+    external_send: hard_confirm
+
+    bulk_access: block
+
+    out_of_scope_actions:
+      - action: process_financial_transaction
+        description: process financial transactions or payments
+        role_description: appointment scheduling and patient logistics only
+        patterns:
+          - \b(transfer|wire|send\s+funds?|process\s+payment|pay\s+invoice|initiate\s+payment)\b
+          - \$\s*[\d,]+.{0,30}\b(transfer|send|wire|pay|move)\b
+          - \b(financial\s+transaction|wire\s+transfer|bank\s+transfer|direct\s+deposit)\b
+      - action: modify_clinical_records
+        description: modify, delete, or alter clinical records or audit logs
+        role_description: appointment scheduling and patient logistics only
+        patterns:
+          - \b(delete|remove|purge|alter|falsify)\s+(record|log|entry|file|note|history)\b
+          - \b(overwrite|clear|wipe)\s+(clinical|medical|patient|audit)\b
+
+  billing-agent:
+    # Billing and insurance: diagnosis/procedure codes only, never clinical notes
+    allowed_entities:
+      - ICD_CODE
+      - CPT_CODE
+      - INSURANCE_ID
+      - DATE_OF_SERVICE
+      - AMOUNT
+      - ORG
+
+    forbidden_entities:
+      - CLINICAL_NOTE
+      - MEDICATION
+      - PSYCHIATRIC_RECORD
+      - HIV_STATUS
+      - PERSON_DETAIL
+      - LAB_RESULT
+
+    bulk_access: soft_confirm
+
+    requires_approval_for:
+      - action: export_data
+        always: true
+
+    out_of_scope_actions:
+      - action: send_external_communication
+        description: send emails or messages to patients or external parties
+        role_description: billing codes and insurance claim processing only
+        patterns:
+          - \b(send|email|forward|message|notify)\b.{0,40}@
+          - \b(draft|compose|write)\s+(email|message|letter)\s+(to|for)\s+(patient|insurer|provider|vendor)\b
+          - \bsend\s+(this|the|a)\s+(report|summary|invoice)\s+(to|via\s+email)\b
+      - action: access_treatment_plan
+        description: access or retrieve patient treatment plans or clinical decisions
+        role_description: billing codes and insurance claim processing only
+        patterns:
+          - \b(retrieve|access|pull|get|view|read)\s+(treatment\s+plan|care\s+plan|clinical\s+decision|physician\s+order)\b
+          - \btreatment\s+plan\b
+          - \bclinical\s+decision\b
+
+  pharmacy-agent:
+    # Medication reconciliation: current meds only, never special category
+    allowed_entities:
+      - MEDICATION
+      - DOSAGE
+      - MRN
+      - DATE_OF_SERVICE
+
+    forbidden_entities:
+      - PSYCHIATRIC_MED
+      - HIV_MED
+      - SUBSTANCE_ABUSE_MED
+
+    # Special category medications require the treating specialist to be in session
+    special_category_override: treating_specialist_only
+
+    bulk_access: block
+
+    out_of_scope_actions:
+      - action: process_billing_claim
+        description: process insurance billing claims or generate invoices
+        role_description: medication reconciliation only
+        patterns:
+          - \b(submit|process|file|generate|create)\s+(claim|invoice|billing|charge|bill)\b
+          - \b(insurance\s+claim|billing\s+code|generate\s+invoice|submit\s+to\s+insurer)\b
+          - \bCPT\s+code\b
+      - action: schedule_appointment
+        description: schedule, book, or manage patient appointments
+        role_description: medication reconciliation only
+        patterns:
+          - \b(schedule|book|reschedule|cancel|set\s+up)\s+(appointment|visit|consultation|follow.up)\b
+          - \b(calendar|time\s+slot|availability|booking\s+system)\b

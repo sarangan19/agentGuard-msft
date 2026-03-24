@@ -1,0 +1,124 @@
+# agentguard_lawfirm.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# AgentGuard policy configuration — Pearson Hardman Law Firm
+# Domain: legal (attorney-client privilege, cross-matter firewall)
+# Agents: donna-agent, research-bot-001, research-bot-002, billing-agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+deployment: pearson_hardman
+domain: legal
+audit_format: legal_privilege
+
+agents:
+  # Dashboard demo agent — scoped to MATTER-2024-001 only (cross-matter firewall active)
+  dash_law_agent:
+    matters:
+      - MATTER-2024-001
+    forbidden_matters:
+      - MATTER-2024-002
+      - MATTER-2024-003
+    forbidden_entities: []
+    max_external_send: hard_confirm
+    external_access: hard_confirm
+    bulk_export: block
+    requires_approval_for:
+      - action: send_email
+        always: true
+      - action: export_data
+        always: true
+
+  donna-agent:
+    # Donna is assigned to MATTER-2024-001 and MATTER-2024-002
+    matters:
+      - MATTER-2024-001
+      - MATTER-2024-002
+
+    # No entity types are outright forbidden — Donna has broad access
+    forbidden_entities: []
+
+    # External communications always require hard confirmation
+    max_external_send: hard_confirm
+    external_access: hard_confirm
+
+    # Bulk export of client files is blocked — this is the departing-associate threat
+    bulk_export: block
+
+    requires_approval_for:
+      - action: send_email
+        always: true
+      - action: export_data
+        always: true
+
+  research-bot-001:
+    # Strictly scoped to MATTER-2024-001 (Johnson personal injury)
+    matters:
+      - MATTER-2024-001
+    forbidden_matters:
+      - MATTER-2024-002
+      - MATTER-2024-003
+
+    # No external access — research bot works with internal documents only
+    external_access: block
+
+    bulk_export: block
+
+    requires_approval_for:
+      - action: export_data
+        always: true
+
+  research-bot-002:
+    # Strictly scoped to MATTER-2024-002 (Coastal Corp M&A)
+    matters:
+      - MATTER-2024-002
+    forbidden_matters:
+      - MATTER-2024-001
+      - MATTER-2024-003
+
+    external_access: block
+    bulk_export: block
+
+    requires_approval_for:
+      - action: export_data
+        always: true
+
+  billing-agent:
+    # Billing only — financial and temporal data, never case strategy
+    allowed_entities:
+      - AMOUNT
+      - DATE
+      - ORG
+      - INVOICE_REF
+
+    forbidden_entities:
+      - CASE_STRATEGY
+      - CLIENT_COMMUNICATION
+      - ATTORNEY_NOTE
+      - MATTER_REF
+
+    external_access: block
+    bulk_export: soft_confirm
+
+    # Score boost applied when billing agent accesses anything outside billing scope
+    score_boost_on_violation: 50
+
+    out_of_scope_actions:
+      - action: access_case_strategy
+        description: access or retrieve case strategy documents or privileged legal communications
+        role_description: billing records, time entries, and financial data only
+        patterns:
+          - \b(case\s+strategy|litigation\s+plan|settlement\s+strategy|legal\s+memo)\b
+          - \b(retrieve|access|pull|get)\s+(privileged|attorney.client|work\s+product)\b
+          - \b(strategy\s+document|legal\s+advice|counsel\s+memo)\b
+      - action: communicate_with_client_or_counsel
+        description: draft or send communications to clients or opposing counsel
+        role_description: billing records, time entries, and financial data only
+        patterns:
+          - \b(draft|send|write|compose|email)\s+.{0,30}(client|opposing\s+counsel|partner|attorney)\b
+          - \bclient\s+(letter|communication|correspondence|update)\b
+          - \b(correspond|communicate)\s+with\s+(client|counsel|opposing)\b
+      - action: modify_audit_trail
+        description: delete, alter, or suppress audit log entries or time records
+        role_description: billing records, time entries, and financial data only
+        patterns:
+          - \b(delete|remove|alter|modify|suppress|hide)\s+(audit|log|time\s+entr|billing\s+record)\b
+          - \b(clear|wipe|purge)\s+(audit|log|record|entr)\b

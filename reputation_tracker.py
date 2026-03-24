@@ -199,6 +199,7 @@ class ReputationTracker:
                 entry.request_count = int(doc.get("total_decisions", 0))
                 entry.block_count = int(doc.get("total_blocks", 0))
                 entry.escalation_count = int(doc.get("total_escalations", 0))
+                entry.auto_count = int(doc.get("total_auto", 0))
                 entry.cosmos_history = doc.get("score_history", [])
                 return entry
         return ReputationEntry(agent_id=agent_id)
@@ -222,6 +223,7 @@ class ReputationTracker:
             "total_decisions": entry.request_count,
             "total_blocks": entry.block_count,
             "total_escalations": entry.escalation_count,
+            "total_auto": entry.auto_count,
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "score_history": entry.cosmos_history,
         }

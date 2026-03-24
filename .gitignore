@@ -1,7 +1,8 @@
 .env
 nul
 __pycache__/
-streamlit_error.log
+*.log
+*.log.*
 
 # Auto-generated Python package metadata
 agentguard.egg-info/

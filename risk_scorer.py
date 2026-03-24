@@ -172,13 +172,13 @@ def run_prefilter(text: str) -> PreFilterResult:
 # STAGE 2: AI RISK SCORER
 # ═══════════════════════════════════════════════════════════════
 
-_RISK_SYSTEM_PROMPT = """You are a security risk assessment engine for a financial AI agent.
+_RISK_SYSTEM_PROMPT_BASE = """You are a security risk assessment engine for an AI agent security platform.
 Score the following action request on a scale of 0-100 based on these 4 factors (each 0-25):
 
-1. data_sensitivity   — Does it involve PII, financial data, credentials?
+1. data_sensitivity   — Does it involve PII, sensitive records, or protected information?
 2. reversibility      — How difficult is it to undo this action? (25 = irreversible)
 3. blast_radius       — How many people/records are affected?
-4. policy_compliance  — Does this violate standard financial controls?
+4. policy_compliance  — Does this violate the organisation's policies and controls?
 
 You receive ANONYMIZED text and metadata context. Use both to score accurately.
 
@@ -193,6 +193,28 @@ Return ONLY valid JSON with no markdown fences:
   },
   "reasoning": "<one concise sentence explaining the main risk>"
 }"""
+
+# Domain-specific context appended to the base prompt so the scorer uses the right frame
+_RISK_DOMAIN_ADDONS: dict[str, str] = {
+    "finance": (
+        "\n\nContext: Financial services environment. Wire transfers, bulk exports, "
+        "and external sends involving accounts or amounts are high-risk. "
+        "Audit trail deletion and privilege escalation are critical violations."
+    ),
+    "legal": (
+        "\n\nContext: Law firm environment governed by attorney-client privilege. "
+        "Cross-matter access, privilege markers (ATTORNEY-CLIENT, WORK PRODUCT), "
+        "and external sends of case materials should score 85+. "
+        "Bulk document export by any agent scores 90+."
+    ),
+    "healthcare": (
+        "\n\nContext: Hospital environment governed by HIPAA. "
+        "Access to psychiatric records, HIV status, or substance abuse records "
+        "by any non-treating agent scores 90+. Bulk patient record export scores 95+. "
+        "Minimum necessary violations (agent accessing more PHI than its scope requires) "
+        "should score 70+."
+    ),
+}
 
 
 @dataclass
@@ -315,6 +337,7 @@ class RiskScorer:
         anonymized_text: str,
         metadata: dict,
         content_safety_blocked: bool = False,
+        domain: str = "generic",
     ) -> RiskScore:
         """
         Full scoring pipeline.
@@ -346,7 +369,7 @@ class RiskScorer:
             )
 
         # Step 2: AI risk scoring
-        ai_result = self._azure_score(anonymized_text, metadata)
+        ai_result = self._azure_score(anonymized_text, metadata, domain=domain)
         if ai_result is not None:
             ai_result.prefilter_triggered = False
             ai_result.prefilter_patterns = []
@@ -359,11 +382,12 @@ class RiskScorer:
         return result
 
     # ----------------------------------------------------------
-    def _azure_score(self, anonymized_text: str, metadata: dict) -> Optional[RiskScore]:
+    def _azure_score(self, anonymized_text: str, metadata: dict, domain: str = "generic") -> Optional[RiskScore]:
         """
         Call Azure OpenAI for risk scoring.
         Returns RiskScore on success, None on failure.
         """
+        system_prompt = _RISK_SYSTEM_PROMPT_BASE + _RISK_DOMAIN_ADDONS.get(domain, "")
         user_message = (
             f"Anonymized action: {anonymized_text}\n"
             f"Context metadata: {json.dumps(metadata)}\n\n"
@@ -371,7 +395,7 @@ class RiskScorer:
             "which increases both data_sensitivity and reversibility scores."
         )
         raw = self.openai_svc.chat_complete(
-            system_prompt=_RISK_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_message=user_message,
             temperature=0.0,
             max_tokens=400,

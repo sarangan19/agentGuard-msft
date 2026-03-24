@@ -1,0 +1,48 @@
+# agentguard_finance.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# AgentGuard policy configuration — TechCorp Finance
+# Domain: financial services
+# Agents: live-financial-agent (the AI agent running the Streamlit demo)
+# ──────────────────────────────────────────────────────────────────────────────
+
+deployment: techcorp_finance
+domain: finance
+audit_format: standard
+
+agents:
+  live-financial-agent:
+    # Entity types this agent is permitted to see
+    allowed_entities:
+      - AMOUNT
+      - DATE
+      - ORG
+      - ACCOUNT
+      - EMAIL
+      - PERSON
+
+    # Entity types that must never appear in this agent's requests
+    forbidden_entities:
+      - SSN
+      - PASSPORT
+      - HEALTH_RECORD
+
+    # Ceiling tier: hard — agent can never auto-approve without at least soft review
+    # beyond the standard thresholds
+    max_risk_tier: block
+
+    # Bulk export of financial records always escalates
+    bulk_export: hard_confirm
+
+    # Sending data externally requires hard confirmation above a moderate risk score
+    external_send: hard_confirm
+
+    # Actions that always require human approval regardless of risk score
+    requires_approval_for:
+      - action: execute_payment
+        above_risk: 40
+      - action: delete_records
+        always: true
+      - action: modify_permissions
+        always: true
+      - action: send_email
+        above_risk: 30
