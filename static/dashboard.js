@@ -1384,6 +1384,7 @@ const SIM = {
   feedItems: [],
   scriptedFired: new Set(),
   currentAgentIdx: 0,
+  activeCount: 0,
   judgeRunning: false,
   judgeQueue: [],
   elapsedTimer: null,
@@ -1820,6 +1821,7 @@ function pickNextAgent() {
 }
 
 async function runAgentRequest(agentId, prompt) {
+  SIM.activeCount++;
   simSetAgentBubble(agentId, prompt);  // show request text before animation
   simHighlightAgent(agentId, true);
   simActivateLine(agentId, true);
@@ -1859,6 +1861,7 @@ async function runAgentRequest(agentId, prompt) {
     console.warn('Sim request error:', e);
     simSetCenterStep('Error', false);
   } finally {
+    SIM.activeCount = Math.max(0, SIM.activeCount - 1);
     setTimeout(() => {
       simHighlightAgent(agentId, false);
       simActivateLine(agentId, false);
@@ -1869,7 +1872,7 @@ async function runAgentRequest(agentId, prompt) {
 }
 
 async function simTick() {
-  if (!SIM.running || SIM.paused) return;
+  if (!SIM.running || SIM.paused || SIM.activeCount >= 2) return;
 
   const elapsed = SIM.startTime ? Date.now() - SIM.startTime : 0;
   const scripted = simGetScripted();
@@ -1973,6 +1976,7 @@ function simReset() {
   SIM.feedItems = [];
   SIM.scriptedFired = new Set();
   SIM.currentAgentIdx = 0;
+  SIM.activeCount = 0;
   SIM.judgeRunning = false;
   SIM.judgeQueue = [];
 
