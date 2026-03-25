@@ -2041,7 +2041,7 @@ function simJudgeInit() {
   simGetAgents().forEach(ag => {
     const opt = document.createElement('option');
     opt.value = ag.id;
-    opt.textContent = `${ag.icon} ${ag.name}`;
+    opt.textContent = `${ag.name} — ${ag.role}`;
     select.appendChild(opt);
   });
   const result = document.getElementById('sim-judge-result');
