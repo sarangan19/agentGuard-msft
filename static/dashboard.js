@@ -1384,7 +1384,8 @@ const SIM = {
   feedItems: [],
   scriptedFired: new Set(),
   currentAgentIdx: 0,
-  activeRequest: false,
+  judgeRunning: false,
+  judgeQueue: [],
   elapsedTimer: null,
 };
 
@@ -1819,7 +1820,6 @@ function pickNextAgent() {
 }
 
 async function runAgentRequest(agentId, prompt) {
-  SIM.activeRequest = true;
   simSetAgentBubble(agentId, prompt);  // show request text before animation
   simHighlightAgent(agentId, true);
   simActivateLine(agentId, true);
@@ -1865,12 +1865,11 @@ async function runAgentRequest(agentId, prompt) {
       simSetCenterStep('Ready', false);
       simSetAgentBubble(agentId, '');
     }, 1500);
-    SIM.activeRequest = false;
   }
 }
 
 async function simTick() {
-  if (!SIM.running || SIM.paused || SIM.activeRequest) return;
+  if (!SIM.running || SIM.paused) return;
 
   const elapsed = SIM.startTime ? Date.now() - SIM.startTime : 0;
   const scripted = simGetScripted();
@@ -1974,7 +1973,8 @@ function simReset() {
   SIM.feedItems = [];
   SIM.scriptedFired = new Set();
   SIM.currentAgentIdx = 0;
-  SIM.activeRequest = false;
+  SIM.judgeRunning = false;
+  SIM.judgeQueue = [];
 
   simSetStatus('idle');
   simSetCenterStep('Ready', false);
@@ -2048,8 +2048,8 @@ function simJudgeInit() {
   if (result) { result.textContent = ''; result.className = 'sim-judge-result'; }
 }
 
-async function runJudgeRequest(agentId, prompt) {
-  // Parallel to auto-sim — does NOT touch SIM.activeRequest
+async function _execJudgeRequest(agentId, prompt) {
+  SIM.judgeRunning = true;
   simSetAgentBubble(agentId, prompt);
   simHighlightAgent(agentId, true);
   simActivateLine(agentId, true);
@@ -2077,16 +2077,12 @@ async function runJudgeRequest(agentId, prompt) {
           result.className = `sim-judge-result ${cls}`;
           result.textContent = `Result: ${tier.toUpperCase()} — Risk Score ${score}`;
         }
-        const btn = document.getElementById('sim-judge-btn');
-        if (btn) btn.disabled = false;
       }
     });
   } catch (e) {
     console.warn('Judge request error:', e);
     const result = document.getElementById('sim-judge-result');
     if (result) { result.className = 'sim-judge-result bad'; result.textContent = 'Error: pipeline request failed'; }
-    const btn = document.getElementById('sim-judge-btn');
-    if (btn) btn.disabled = false;
   } finally {
     setTimeout(() => {
       simHighlightAgent(agentId, false);
@@ -2094,6 +2090,25 @@ async function runJudgeRequest(agentId, prompt) {
       simSetCenterStep('Ready', false);
       simSetAgentBubble(agentId, '');
     }, 1500);
+    SIM.judgeRunning = false;
+    // Drain queue
+    if (SIM.judgeQueue.length > 0) {
+      const next = SIM.judgeQueue.shift();
+      _updateJudgeQueueStatus();
+      _execJudgeRequest(next.agentId, next.prompt);
+    } else {
+      const btn = document.getElementById('sim-judge-btn');
+      if (btn) btn.disabled = false;
+    }
+  }
+}
+
+function _updateJudgeQueueStatus() {
+  const result = document.getElementById('sim-judge-result');
+  if (!result) return;
+  if (SIM.judgeQueue.length > 0) {
+    result.className = 'sim-judge-result';
+    result.textContent = `Queued (${SIM.judgeQueue.length} waiting)\u2026`;
   }
 }
 
@@ -2116,9 +2131,15 @@ function simJudgeSend() {
   }
 
   if (btn) btn.disabled = true;
-  if (result) { result.className = 'sim-judge-result'; result.textContent = 'Sending to AgentGuard\u2026'; }
+  if (textarea) textarea.value = '';
 
-  runJudgeRequest(agentId, prompt);
+  if (SIM.judgeRunning) {
+    SIM.judgeQueue.push({ agentId, prompt });
+    if (result) { result.className = 'sim-judge-result'; result.textContent = `Queued (${SIM.judgeQueue.length} waiting)\u2026`; }
+  } else {
+    if (result) { result.className = 'sim-judge-result'; result.textContent = 'Sending to AgentGuard\u2026'; }
+    _execJudgeRequest(agentId, prompt);
+  }
 }
 
 // ==================== SIM KEYBOARD SHORTCUTS ====================
