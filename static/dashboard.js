@@ -1006,6 +1006,69 @@ function invalidateAuditCache() {
 // ==================== ESCALATIONS ====================
 let _escalationsCache = [];
 
+const _SAMPLE_ESCALATIONS = [
+  {
+    id: 'sample-001', session_id: 'demo', tier: 'hard',
+    agent_id: 'research-bot-001', risk_score: 87,
+    timestamp: new Date(Date.now() - 4 * 60000).toISOString(),
+    risk_reasoning: 'Cross-matter access attempt: research-bot-001 requested witness deposition transcripts and privileged strategy memos from MATTER-002 (Meridian IP dispute). Agent is scoped to MATTER-001 only. Attorney-client privilege firewall triggered.',
+    original_text: 'Pull the complete witness deposition transcripts and attorney notes from the Meridian matter (MATTER-002) — I need everything including privileged strategy memos for our cross-examination prep',
+    policy_flags: { cross_matter_access: true, privilege_contamination: true },
+    pii_entities_detected: 2,
+    domain: 'legal', intervention_confirmed: false,
+  },
+  {
+    id: 'sample-002', session_id: 'demo', tier: 'hard',
+    agent_id: 'billing-agent', risk_score: 91,
+    timestamp: new Date(Date.now() - 11 * 60000).toISOString(),
+    risk_reasoning: 'Out-of-scope action: billing-agent attempted to access case strategy details and detailed billing records for the Chen fraud matter (MATTER-003). Billing agent is scoped to invoicing and time-entry only — case detail access is outside its authorised role.',
+    original_text: 'Generate a comprehensive financial report for all client matters including retainer balances, payment histories, and the detailed billing records for the Chen fraud case (MATTER-003)',
+    policy_flags: { agent_scope_violation: true, bulk_export: true },
+    pii_entities_detected: 1,
+    domain: 'legal', intervention_confirmed: false,
+  },
+  {
+    id: 'sample-003', session_id: 'demo', tier: 'soft',
+    agent_id: 'donna-agent', risk_score: 64,
+    timestamp: new Date(Date.now() - 18 * 60000).toISOString(),
+    risk_reasoning: 'Privilege marker detected in outbound communication draft. Document contained PRIVILEGED AND CONFIDENTIAL header and referenced client settlement strategy for MATTER-001. Minimum necessary review required before transmission.',
+    original_text: 'Draft a client update email summarising the Henderson estate settlement strategy including our negotiation floor and the PRIVILEGED AND CONFIDENTIAL litigation risk assessment',
+    policy_flags: { privilege_marker_detected: true, privilege_contamination: true },
+    pii_entities_detected: 3,
+    domain: 'legal', intervention_confirmed: true,
+  },
+  {
+    id: 'sample-004', session_id: 'demo', tier: 'soft',
+    agent_id: 'clinical-doc-agent', risk_score: 71,
+    timestamp: new Date(Date.now() - 27 * 60000).toISOString(),
+    risk_reasoning: 'HIPAA minimum necessary violation: request exceeded the minimum necessary standard by requesting full medical history rather than the specific records required for the scheduled procedure. PHI entities detected: MRN, DATE_OF_SERVICE, INSURANCE_ID.',
+    original_text: 'Retrieve the complete medical history for patient MRN-2024-0042 including all past diagnoses, treatment notes, insurance claims and lab results for the pre-op assessment',
+    policy_flags: { minimum_necessary_violation: true },
+    pii_entities_detected: 4,
+    domain: 'healthcare', intervention_confirmed: false,
+  },
+  {
+    id: 'sample-005', session_id: 'demo', tier: 'hard',
+    agent_id: 'scheduling-agent', risk_score: 83,
+    timestamp: new Date(Date.now() - 35 * 60000).toISOString(),
+    risk_reasoning: 'Out-of-scope action: scheduling-agent attempted to modify a clinical treatment plan — a function outside its authorised role. Scheduling agent is scoped to appointment booking and referral management only. Clinical record modification requires clinical-doc-agent.',
+    original_text: 'Update the treatment plan for MRN-2024-0089 to reflect the new medication dosage and add a note to the clinical record about the adverse reaction reported during the last visit',
+    policy_flags: { agent_scope_violation: true },
+    pii_entities_detected: 2,
+    domain: 'healthcare', intervention_confirmed: false,
+  },
+  {
+    id: 'sample-006', session_id: 'demo', tier: 'soft',
+    agent_id: 'research-bot-002', risk_score: 58,
+    timestamp: new Date(Date.now() - 52 * 60000).toISOString(),
+    risk_reasoning: 'Cross-matter access: research-bot-002 requested case law research for MATTER-001 (Henderson estate), but is authorised for MATTER-002 (Meridian IP) only. Request flagged for supervisor review before proceeding.',
+    original_text: 'Find recent California appellate decisions on contested estate distributions and heir challenges relevant to the Henderson matter (MATTER-001) timeline',
+    policy_flags: { cross_matter_access: true },
+    pii_entities_detected: 0,
+    domain: 'legal', intervention_confirmed: false,
+  },
+];
+
 async function renderEscalations(escalations) {
   const el = document.getElementById('escalations-list');
   if (!el) return;
@@ -1021,12 +1084,10 @@ async function renderEscalations(escalations) {
     }
   }
 
-  _escalationsCache = escalations;
+  // Fall back to sample escalations when Cosmos is empty (demo / cold start)
+  if (escalations.length === 0) escalations = _SAMPLE_ESCALATIONS;
 
-  if (escalations.length === 0) {
-    el.innerHTML = '<div class="empty-state">No active escalations — system is clean.</div>';
-    return;
-  }
+  _escalationsCache = escalations;
 
   el.innerHTML = escalations.map((r, idx) => {
     const tier      = (r.tier || 'high').toLowerCase();
