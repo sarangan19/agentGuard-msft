@@ -134,16 +134,17 @@ function navigateTo(page) {
 // ==================== POLLING ====================
 async function pollAll() {
   try {
-    const [actData, metricsData, healthData] = await Promise.all([
+    const [actData, metricsData, healthData, sessionData] = await Promise.all([
       API.get('/activity?limit=20'),
       API.get('/metrics'),
-      API.get('/health')
+      API.get('/health'),
+      API.get('/session/stats'),
     ]);
     updateStatCards(metricsData);
     renderOverviewFeed(actData.records || []);
     renderOverviewDecisions(actData.records || []);
     renderOverviewSidecards(actData.records || []);
-    updateSidebarStats(metricsData);
+    updateSidebarStats(sessionData);
     updateHealthIndicators(healthData);
 
     const escPage = document.getElementById('page-escalations');
@@ -257,12 +258,12 @@ function updateHealthIndicators(health) {
 }
 
 // ==================== SIDEBAR STATS ====================
-function updateSidebarStats(metrics) {
-  if (!metrics) return;
+function updateSidebarStats(stats) {
+  if (!stats) return;
   const callsEl = document.getElementById('sb-calls');
-  const costEl = document.getElementById('sb-cost');
-  if (callsEl && metrics.api_calls !== undefined) callsEl.textContent = metrics.api_calls;
-  if (costEl && metrics.session_cost !== undefined) costEl.textContent = '$' + parseFloat(metrics.session_cost).toFixed(4);
+  const costEl  = document.getElementById('sb-cost');
+  if (callsEl && stats.azure_call_count !== undefined) callsEl.textContent = stats.azure_call_count;
+  if (costEl  && stats.total_cost       !== undefined) costEl.textContent  = '$' + parseFloat(stats.total_cost).toFixed(4);
 }
 
 // ==================== OVERVIEW FEED ====================
