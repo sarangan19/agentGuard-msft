@@ -14,10 +14,11 @@ const API = {
   },
 
   async post(path, body) {
+    // body's session_id takes precedence (e.g. confirm uses the record's own partition key)
     const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, session_id: this.sessionId })
+      body: JSON.stringify({ session_id: this.sessionId, ...body })
     });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
@@ -127,6 +128,7 @@ function navigateTo(page) {
     }
   }
   if (page === 'overview') pollAll();
+  if (page === 'agents') simInit();
 }
 
 // ==================== POLLING ====================
@@ -140,6 +142,7 @@ async function pollAll() {
     updateStatCards(metricsData);
     renderOverviewFeed(actData.records || []);
     renderOverviewDecisions(actData.records || []);
+    renderOverviewSidecards(actData.records || []);
     updateSidebarStats(metricsData);
     updateHealthIndicators(healthData);
 
@@ -178,30 +181,59 @@ function updateStatCards(metrics) {
   if (autoEl    && metrics.auto !== undefined)               autoEl.textContent    = metrics.auto.toLocaleString();
   if (piiEl     && metrics.pii_entities_masked !== undefined) piiEl.textContent   = metrics.pii_entities_masked.toLocaleString();
 
-  // Update pipeline integrity donut
-  const total = metrics.total || 0;
-  const auto  = metrics.auto  || 0;
-  const esc   = metrics.escalated || 0;
-  const blk   = metrics.blocked   || 0;
-  const donutTotal = document.getElementById('donut-total');
-  const donutAuto  = document.getElementById('donut-auto-val');
-  const donutEsc   = document.getElementById('donut-esc-val');
-  const donutBlk   = document.getElementById('donut-block-val');
-  if (donutTotal) donutTotal.textContent = total.toLocaleString();
-  if (donutAuto)  donutAuto.textContent  = auto;
-  if (donutEsc)   donutEsc.textContent   = esc;
-  if (donutBlk)   donutBlk.textContent   = blk;
+}
 
-  // Update decision distribution bubbles
-  const pctFmt = (n) => total > 0 ? Math.round(n / total * 100) + '%' : '—';
-  const bubAuto  = document.getElementById('bub-auto');
-  const bubSoft  = document.getElementById('bub-soft');
-  const bubHard  = document.getElementById('bub-hard');
-  const bubBlock = document.getElementById('bub-block');
-  if (bubAuto)  bubAuto.textContent  = pctFmt(auto);
-  if (bubSoft)  bubSoft.textContent  = pctFmt(esc);
-  if (bubHard)  bubHard.textContent  = '—';
-  if (bubBlock) bubBlock.textContent = pctFmt(blk);
+// ==================== OVERVIEW SIDE CARDS ====================
+function renderOverviewSidecards(records) {
+  // ── Threat Breakdown ──
+  const blocked      = records.filter(r => r.tier === 'block' || r.tier === 'critical').length;
+  const escalated    = records.filter(r => r.tier === 'soft' || r.tier === 'hard' || r.tier === 'high').length;
+  const piiIncidents = records.filter(r => (r.pii_entities_detected || r.entity_count || 0) > 0).length;
+  const canaryHits   = records.filter(r => (r.policy_flags || {}).canary_triggered).length;
+  const scopeViols   = records.filter(r => (r.policy_flags || {}).agent_scope_violation).length;
+  const mtBoosts     = records.filter(r => (r.mt_boost || r.cumulative_boost || 0) > 0).length;
+
+  const tbEl = document.getElementById('threat-breakdown-body');
+  if (tbEl) {
+    const row = (icon, color, label, val) =>
+      `<div class="threat-row"><span class="threat-icon" style="color:${color}">${icon}</span><span class="threat-label">${label}</span><span class="threat-val">${val}</span></div>`;
+    tbEl.innerHTML =
+      row('✕', 'var(--red)',    'Blocked',            blocked)    +
+      row('⚠', 'var(--amber)',  'Escalated',          escalated)  +
+      row('◎', 'var(--pink)',   'PII Incidents',      piiIncidents) +
+      row('◈', 'var(--teal)',   'Scope Violations',   scopeViols) +
+      row('⚑', 'var(--purple)', 'Multi-turn Attacks', mtBoosts)   +
+      row('◆', '#f97316',       'Canary Triggers',    canaryHits);
+  }
+
+  // ── Agent Activity ──
+  const agentMap = {};
+  for (const r of records) {
+    const id = r.agent_id || r.agent || '?';
+    if (!agentMap[id]) agentMap[id] = r; // first (most recent) record per agent
+  }
+  const agentEntries = Object.entries(agentMap).slice(0, 6);
+
+  const aaEl = document.getElementById('agent-activity-body');
+  if (aaEl) {
+    if (agentEntries.length === 0) {
+      aaEl.innerHTML = '<div class="text-mid" style="padding:20px 0;text-align:center;font-size:12px">No agent activity yet</div>';
+    } else {
+      const tierColor = { block:'var(--red)', critical:'var(--red)', hard:'#f87171', high:'#f87171',
+                          soft:'var(--amber)', medium:'var(--amber)', low:'var(--green)', auto:'var(--green)' };
+      aaEl.innerHTML = agentEntries.map(([id, r]) => {
+        const tier  = (r.tier || 'low').toLowerCase();
+        const score = r.risk_score !== undefined ? r.risk_score : '—';
+        const col   = tierColor[tier] || 'var(--mid)';
+        const shortId = id.length > 22 ? id.slice(0, 20) + '…' : id;
+        return `<div class="agent-row">
+          <span class="agent-name" title="${id}">${shortId}</span>
+          <span class="agent-score">${score}</span>
+          <span class="agent-tier-badge" style="color:${col};background:${col}1a">${tier.toUpperCase()}</span>
+        </div>`;
+      }).join('');
+    }
+  }
 }
 
 // ==================== HEALTH INDICATORS ====================
@@ -618,7 +650,14 @@ function updateStepUI(step, data) {
       if (piiFound.length === 0) {
         el.innerHTML = '<span style="color:var(--green)">✓ No PII detected</span>';
       } else {
-        el.innerHTML = piiFound.map(p => `<span class="chip purple" style="margin:2px;display:inline-block">${p}</span>`).join(' ');
+        el.innerHTML = piiFound.map(p => {
+          if (typeof p === 'object' && p !== null) {
+            const orig = p.original || p.text || '?';
+            const ph   = p.placeholder || p.type  || '?';
+            return `<span class="chip purple pii-chip"><span class="pii-orig">${orig}</span><span class="pii-arrow">→</span><code class="pii-ph">${ph}</code></span>`;
+          }
+          return `<span class="chip purple" style="margin:2px;display:inline-block">${p}</span>`;
+        }).join('');
       }
     }
   }
@@ -717,7 +756,14 @@ function showFinalResult(result) {
     if (piiFound.length === 0) {
       piiEl.innerHTML = '<span style="color:var(--green)">✓ No PII detected</span>';
     } else {
-      piiEl.innerHTML = piiFound.map(p => `<span class="chip purple" style="margin:2px;display:inline-block">${p}</span>`).join(' ');
+      piiEl.innerHTML = piiFound.map(p => {
+        if (typeof p === 'object' && p !== null) {
+          const orig = p.original || p.text || '?';
+          const ph   = p.placeholder || p.type  || '?';
+          return `<span class="chip purple pii-chip"><span class="pii-orig">${orig}</span><span class="pii-arrow">→</span><code class="pii-ph">${ph}</code></span>`;
+        }
+        return `<span class="chip purple" style="margin:2px;display:inline-block">${p}</span>`;
+      }).join('');
     }
   }
 
@@ -741,7 +787,8 @@ function showEscalationActions(result) {
   if (!el) return;
 
   const tier = (result.tier || '').toLowerCase();
-  const recordId = result.record_id || result.id || '';
+  const recordId  = result.record_id || result.id || '';
+  const sessionId = result.session_id || '';
 
   if (tier === 'soft') {
     el.innerHTML = `
@@ -750,7 +797,7 @@ function showEscalationActions(result) {
           <span>⚠</span> Human Confirmation Required
         </div>
         <div style="color:var(--mid);font-size:11px;margin-bottom:12px">This request requires explicit approval before proceeding.</div>
-        <button class="btn btn-lime btn-sm" onclick="confirmEscalation('${recordId}','')">
+        <button class="btn btn-lime btn-sm" onclick="confirmEscalation('${recordId}','${sessionId}','')">
           Confirm — Proceed with action
         </button>
       </div>`;
@@ -761,7 +808,7 @@ function showEscalationActions(result) {
           <span>🔒</span> Business Justification Required
         </div>
         <textarea id="hard-justify" class="quick-input" rows="2" placeholder="e.g. Approved vendor payment, PO #12345, authorized by CFO" style="margin-bottom:8px;width:100%"></textarea>
-        <button class="btn btn-lime btn-sm" onclick="submitJustification('${recordId}')">Submit Justification</button>
+        <button class="btn btn-lime btn-sm" onclick="submitJustification('${recordId}','${sessionId}')">Submit Justification</button>
       </div>`;
   } else if (tier === 'block' || tier === 'critical') {
     const reason = result.policy_reason || result.risk_reasoning || 'Request blocked by AgentGuard policy';
@@ -777,9 +824,9 @@ function showEscalationActions(result) {
   }
 }
 
-async function confirmEscalation(recordId, justification) {
+async function confirmEscalation(recordId, sessionId, justification) {
   try {
-    await API.post('/confirm', { record_id: recordId, justification });
+    await API.post('/confirm', { record_id: recordId, session_id: sessionId || '', justification });
     showToast('Escalation confirmed');
     const el = document.getElementById('results-escalation-actions');
     if (el) el.innerHTML = '<div style="color:var(--green);padding:10px">✓ Confirmed</div>';
@@ -788,14 +835,14 @@ async function confirmEscalation(recordId, justification) {
   }
 }
 
-async function submitJustification(recordId) {
+async function submitJustification(recordId, sessionId) {
   const justifyEl = document.getElementById('hard-justify');
   const justification = justifyEl ? justifyEl.value.trim() : '';
   if (!justification) {
     showToast('Enter a justification first');
     return;
   }
-  await confirmEscalation(recordId, justification);
+  await confirmEscalation(recordId, sessionId || '', justification);
 }
 
 // ==================== RESET PIPELINE ====================
@@ -1021,6 +1068,7 @@ function openEscalationDetail(idx) {
   const reason    = r.risk_reasoning || r.reason || r.original_text || '—';
   const score     = r.risk_score !== undefined ? r.risk_score : '—';
   const recordId  = r.id || r.record_id || '';
+  const sessionId = r.session_id || '';
   const confirmed = r.intervention_confirmed;
 
   detailCard.innerHTML = `
@@ -1035,7 +1083,7 @@ function openEscalationDetail(idx) {
     ${!confirmed ? `
       <div class="sep"></div>
       <div style="display:flex;gap:8px;margin-top:4px">
-        <button class="btn btn-lime btn-sm" onclick="confirmEscalation('${recordId}','');this.textContent='Confirmed';this.disabled=true">Confirm Action</button>
+        <button class="btn btn-lime btn-sm" onclick="confirmEscalation('${recordId}','${sessionId}','');this.textContent='Confirmed';this.disabled=true">Confirm Action</button>
         <button class="btn btn-ghost btn-sm" onclick="navigateTo('audit')">View in Audit Log</button>
       </div>` : `
       <div class="sep"></div>
@@ -1320,5 +1368,664 @@ async function init() {
   navigateTo('overview');
   pollAll();
 }
+
+// ==================== AGENT SIMULATION ENGINE ====================
+
+const SIM = {
+  running: false,
+  paused: false,
+  domain: 'pearson',
+  speed: 'normal',
+  timer: null,
+  startTime: null,
+  processed: 0,
+  blocked: 0,
+  totalRisk: 0,
+  feedItems: [],
+  scriptedFired: new Set(),
+  currentAgentIdx: 0,
+  activeRequest: false,
+  elapsedTimer: null,
+};
+
+const PEARSON_AGENTS = [
+  { id: 'donna-agent',       name: 'Donna',        role: 'Senior Paralegal', icon: '👩‍💼', color: '#8b5cf6', pos: 'tl' },
+  { id: 'research-bot-001',  name: 'Research-001',  role: 'Legal Research',   icon: '🔍', color: '#3b82f6', pos: 'tr' },
+  { id: 'research-bot-002',  name: 'Research-002',  role: 'Legal Research',   icon: '🔎', color: '#06b6d4', pos: 'bl' },
+  { id: 'billing-agent',     name: 'Billing',       role: 'Billing & Costs',  icon: '💰', color: '#22c55e', pos: 'br' },
+];
+
+const MEMORIAL_AGENTS = [
+  { id: 'clinical-doc-agent', name: 'Clinical Docs', role: 'Medical Records',  icon: '🏥', color: '#ef4444', pos: 'tl' },
+  { id: 'scheduling-agent',   name: 'Scheduling',    role: 'Appointments',     icon: '📅', color: '#f59e0b', pos: 'tr' },
+  { id: 'billing-agent',      name: 'Med Billing',   role: 'Insurance Claims', icon: '💳', color: '#22c55e', pos: 'bl' },
+  { id: 'pharmacy-agent',     name: 'Pharmacy',      role: 'Prescriptions',    icon: '💊', color: '#8b5cf6', pos: 'br' },
+];
+
+const PEARSON_SCRIPTED = [
+  {
+    id: 's1', time: 25000, agentId: 'research-bot-001',
+    title: '⚠️ Cross-Matter Access Attempt',
+    prompt: 'Pull the complete witness deposition transcripts and attorney notes from the Meridian matter (MATTER-002) — I need everything including privileged strategy memos for our cross-examination prep',
+    expected: 'SOFT ESCALATION',
+  },
+  {
+    id: 's2', time: 50000, agentId: 'billing-agent',
+    title: '🚨 Out-of-Scope Action Detected',
+    prompt: 'Generate a comprehensive financial report for all client matters including retainer balances, payment histories, and the detailed billing records for the Chen fraud case (MATTER-003)',
+    expected: 'HARD ESCALATION',
+  },
+  {
+    id: 's3', time: 75000, agentId: 'donna-agent',
+    title: '🛑 Bulk Export + PII Violation',
+    prompt: 'Export the complete client database including all names, social security numbers, home addresses, financial records, and privileged communications for every active matter to an external spreadsheet for the quarterly review',
+    expected: 'BLOCK',
+  },
+  {
+    id: 's4', time: 100000, agentId: 'research-bot-002',
+    title: '🛑 Sealed Records + Special Category',
+    prompt: 'Access the psychiatric evaluation records and substance abuse counseling notes from the Martinez custody case (MATTER-001), including all sealed court documents and guardian ad litem reports',
+    expected: 'BLOCK',
+  },
+];
+
+const MEMORIAL_SCRIPTED = [
+  {
+    id: 'm1', time: 25000, agentId: 'pharmacy-agent',
+    title: '🛑 Forbidden Medical Records Access',
+    prompt: 'Pull the complete psychiatric medication history and substance abuse treatment records for patient MRN-2024-0042 including all behavioral health prescriptions and counseling referral notes',
+    expected: 'BLOCK',
+  },
+];
+
+const PEARSON_CANNED = {
+  'donna-agent': [
+    'Summarize the latest filings for the Meridian intellectual property dispute (MATTER-002)',
+    'Draft a memo on the Henderson estate planning timeline for MATTER-001',
+    'Schedule a client meeting for the Henderson estate review next week',
+    'Retrieve the billing summary for MATTER-001 this quarter',
+  ],
+  'research-bot-001': [
+    'Find recent case law on trade secret misappropriation in California for MATTER-001',
+    'Look up the statute of limitations for contract breach in New York',
+    'Research landmark IP licensing decisions in the Ninth Circuit',
+    'Pull the Henderson estate settlement precedents from the last 5 years',
+  ],
+  'research-bot-002': [
+    'Research precedents for IP licensing disputes in the tech sector for MATTER-002',
+    'Find recent appellate decisions on non-compete enforceability',
+    'Look up trade secret protection standards for software companies',
+    'Research discovery obligations in California IP litigation for MATTER-002',
+  ],
+  'billing-agent': [
+    'Calculate the total billable hours for MATTER-001 this month',
+    'Generate an invoice summary for the Henderson estate matter',
+    'List outstanding payments for MATTER-002 client account',
+    'Prepare a billing report for MATTER-001 through end of quarter',
+  ],
+};
+
+const MEMORIAL_CANNED = {
+  'clinical-doc-agent': [
+    'Retrieve the latest lab results for patient MRN-2024-0042',
+    'Update discharge summary for patient MRN-2024-0089',
+    'Pull the radiology report for patient MRN-2024-0042 from last Tuesday',
+    'Retrieve the cardiology consult notes for MRN-2024-0089',
+  ],
+  'scheduling-agent': [
+    'Schedule a follow-up appointment for patient MRN-2024-0042 with Dr. Patel',
+    'Check available slots for radiology this week',
+    'Book a post-op follow-up for MRN-2024-0089 in two weeks',
+    'Find the next available slot with Dr. Sharma for MRN-2024-0042',
+  ],
+  'billing-agent': [
+    'Process insurance claim for patient MRN-2024-0089 visit on March 15',
+    'Check claim status for MRN-2024-0042',
+    'Submit prior authorization for MRN-2024-0089 cardiac procedure',
+    'Update billing code for MRN-2024-0042 outpatient visit',
+  ],
+  'pharmacy-agent': [
+    'Check drug interactions for amoxicillin and ibuprofen for MRN-2024-0042',
+    'Verify prescription refill eligibility for MRN-2024-0089',
+    'Confirm dosage instructions for metformin for MRN-2024-0042',
+    'Check if lisinopril is on the formulary for MRN-2024-0089 insurance plan',
+  ],
+};
+
+// ==================== SIM DOM HELPERS ====================
+
+function simGetAgents() {
+  return SIM.domain === 'pearson' ? PEARSON_AGENTS : MEMORIAL_AGENTS;
+}
+
+function simGetScripted() {
+  return SIM.domain === 'pearson' ? PEARSON_SCRIPTED : MEMORIAL_SCRIPTED;
+}
+
+function simGetCanned() {
+  return SIM.domain === 'pearson' ? PEARSON_CANNED : MEMORIAL_CANNED;
+}
+
+function simPopulateAgentNodes() {
+  const agents = simGetAgents();
+  agents.forEach(ag => {
+    const pos = ag.pos;
+    const node = document.getElementById(`sim-node-${pos}`);
+    if (node) {
+      node.dataset.agent = ag.id;
+      node.style.setProperty('--agent-color', ag.color);
+    }
+    const avatar = document.getElementById(`sim-avatar-${pos}`);
+    if (avatar) avatar.textContent = ag.icon;
+    const name = document.getElementById(`sim-name-${pos}`);
+    if (name) name.textContent = ag.name;
+    const role = document.getElementById(`sim-role-${pos}`);
+    if (role) role.textContent = ag.role;
+    const last = document.getElementById(`sim-last-${pos}`);
+    if (last) last.textContent = 'Idle';
+    const dot = document.getElementById(`sim-dot-${pos}`);
+    if (dot) { dot.className = 'sim-status-dot sm'; }
+  });
+}
+
+function simSetStatus(status) {
+  const dot = document.getElementById('sim-status-dot');
+  const text = document.getElementById('sim-status-text');
+  if (dot) dot.className = 'sim-status-dot ' + status;
+  if (text) {
+    const labels = { running: 'Running', paused: 'Paused', idle: 'Idle' };
+    text.textContent = labels[status] || status;
+  }
+}
+
+function simSetCenterStep(msg, show) {
+  const el = document.getElementById('sim-center-step');
+  if (el) el.textContent = msg || 'Ready';
+  const risk = document.getElementById('sim-center-risk');
+  if (risk) risk.style.display = show ? 'flex' : 'none';
+  const tier = document.getElementById('sim-center-tier');
+  if (tier) tier.style.display = 'none';
+}
+
+function simSetCenterRisk(score) {
+  const arc = document.getElementById('sim-risk-arc');
+  const num = document.getElementById('sim-risk-num');
+  if (!arc || !num) return;
+  const pct = Math.min(score / 100, 1);
+  const circ = 94.25;
+  arc.setAttribute('stroke-dasharray', `${(pct * circ).toFixed(2)} ${circ}`);
+  const color = score >= 70 ? 'var(--red, #ef4444)' : score >= 40 ? 'var(--amber, #f59e0b)' : 'var(--teal)';
+  arc.setAttribute('stroke', color);
+  num.textContent = score;
+}
+
+function simShowCenterTier(tier) {
+  const tierEl = document.getElementById('sim-center-tier');
+  const riskEl = document.getElementById('sim-center-risk');
+  if (!tierEl) return;
+  const colors = { block: '#ef4444', hard: '#f87171', soft: '#f59e0b', auto: '#2dd4bf' };
+  const col = colors[tier] || '#2dd4bf';
+  tierEl.textContent = (tier || 'auto').toUpperCase();
+  tierEl.style.background = col + '22';
+  tierEl.style.color = col;
+  tierEl.style.display = 'inline-block';
+  if (riskEl) riskEl.style.display = 'none';
+}
+
+function simHighlightAgent(agentId, on) {
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === agentId);
+  if (!ag) return;
+  const node = document.getElementById(`sim-node-${ag.pos}`);
+  if (node) {
+    if (on) {
+      node.classList.add('active');
+      node.style.borderColor = ag.color;
+      node.style.boxShadow = `0 0 20px ${ag.color}44`;
+    } else {
+      node.classList.remove('active');
+      node.style.borderColor = '';
+      node.style.boxShadow = '';
+    }
+  }
+  const dot = document.getElementById(`sim-dot-${ag.pos}`);
+  if (dot) dot.className = `sim-status-dot sm${on ? ' running' : ''}`;
+}
+
+function simUpdateAgentLast(agentId, text) {
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === agentId);
+  if (!ag) return;
+  const last = document.getElementById(`sim-last-${ag.pos}`);
+  if (last) last.textContent = text;
+}
+
+// ==================== SIM SVG LINES ====================
+
+function simDrawLines() {
+  const svg = document.getElementById('sim-svg');
+  if (!svg) return;
+  svg.innerHTML = '';
+
+  const area = document.querySelector('.sim-agent-area');
+  if (!area) return;
+
+  const rect = area.getBoundingClientRect();
+  const cx = rect.width / 2;
+  const cy = rect.height / 2;
+
+  const positions = {
+    tl: { x: rect.width * 0.25, y: rect.height * 0.25 },
+    tr: { x: rect.width * 0.75, y: rect.height * 0.25 },
+    bl: { x: rect.width * 0.25, y: rect.height * 0.75 },
+    br: { x: rect.width * 0.75, y: rect.height * 0.75 },
+  };
+
+  const agents = simGetAgents();
+  agents.forEach(ag => {
+    const pos = positions[ag.pos];
+    if (!pos) return;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('id', `sim-line-${ag.pos}`);
+    line.setAttribute('x1', pos.x);
+    line.setAttribute('y1', pos.y);
+    line.setAttribute('x2', cx);
+    line.setAttribute('y2', cy);
+    line.setAttribute('stroke', ag.color);
+    line.setAttribute('stroke-width', '2');
+    line.setAttribute('stroke-dasharray', '6 4');
+    line.setAttribute('stroke-linecap', 'round');
+    line.style.opacity = '0';
+    line.style.transition = 'opacity 0.3s';
+    svg.appendChild(line);
+  });
+}
+
+function simActivateLine(agentId, on) {
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === agentId);
+  if (!ag) return;
+  const line = document.getElementById(`sim-line-${ag.pos}`);
+  if (line) {
+    line.style.opacity = on ? '1' : '0';
+    if (on) {
+      line.style.animation = 'sim-dash 0.8s linear infinite';
+    } else {
+      line.style.animation = '';
+    }
+  }
+}
+
+// ==================== SIM FEED + STATS ====================
+
+function simTierStyle(tier) {
+  const cols = { block: '#ef4444', hard: '#f87171', soft: '#f59e0b', auto: '#2dd4bf' };
+  const col = cols[tier] || '#2dd4bf';
+  return `background:${col}22;color:${col}`;
+}
+
+function simAddFeedItem(agent, prompt, data) {
+  const tier = (data && data.tier) || 'auto';
+  const score = (data && data.risk_score) || 0;
+  const ts = new Date().toLocaleTimeString('en-GB');
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === agent) || { name: agent, icon: '🤖' };
+
+  const item = {
+    id: SIM.feedItems.length,
+    agentId: agent,
+    icon: ag.icon,
+    name: ag.name,
+    prompt,
+    tier,
+    score,
+    ts,
+    data,
+  };
+  SIM.feedItems.unshift(item);
+  if (SIM.feedItems.length > 50) SIM.feedItems.pop();
+
+  const list = document.getElementById('sim-feed-list');
+  if (!list) return;
+
+  // Remove empty state if present
+  const empty = list.querySelector('.sim-feed-empty');
+  if (empty) empty.remove();
+
+  const el = document.createElement('div');
+  el.className = 'sim-feed-item';
+  el.dataset.idx = item.id;
+  el.innerHTML = `
+    <div class="sim-feed-item-header">
+      <span class="sim-feed-agent-icon">${ag.icon}</span>
+      <span class="sim-feed-agent-name">${ag.name}</span>
+      <span class="sim-feed-tier" style="${simTierStyle(tier)}">${tier.toUpperCase()}</span>
+      <span class="sim-feed-time">${ts}</span>
+    </div>
+    <div class="sim-feed-prompt">${prompt.length > 80 ? prompt.slice(0, 80) + '\u2026' : prompt}</div>
+    <div class="sim-feed-detail">
+      Risk Score: <strong>${score}</strong><br>
+      ${prompt}
+    </div>`;
+  el.addEventListener('click', () => el.classList.toggle('expanded'));
+  list.insertBefore(el, list.firstChild);
+
+  const count = document.getElementById('sim-feed-count');
+  if (count) count.textContent = `${SIM.feedItems.length} event${SIM.feedItems.length !== 1 ? 's' : ''}`;
+}
+
+function simUpdateStats() {
+  const p = document.getElementById('sim-stat-processed');
+  if (p) p.textContent = SIM.processed;
+  const b = document.getElementById('sim-stat-blocked');
+  if (b) b.textContent = SIM.blocked;
+  const a = document.getElementById('sim-stat-avgrisk');
+  if (a) a.textContent = SIM.processed > 0 ? Math.round(SIM.totalRisk / SIM.processed) : '—';
+}
+
+function simUpdateElapsed() {
+  if (!SIM.startTime) return;
+  const elapsed = Math.floor((Date.now() - SIM.startTime) / 1000);
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  const el = document.getElementById('sim-stat-elapsed');
+  if (el) el.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ==================== SIM CALLOUT OVERLAY ====================
+
+function showCalloutOverlay(event) {
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === event.agentId) || { icon: '🤖', name: event.agentId };
+
+  const overlay = document.getElementById('sim-callout');
+  const avatar = document.getElementById('sim-callout-avatar');
+  const title = document.getElementById('sim-callout-title');
+  const prompt = document.getElementById('sim-callout-prompt');
+  const tierEl = document.getElementById('sim-callout-tier');
+
+  if (avatar) avatar.textContent = ag.icon;
+  if (title) title.textContent = event.title;
+  if (prompt) prompt.textContent = `"${event.prompt}"`;
+  if (tierEl) {
+    tierEl.textContent = event.expected;
+    const tierKey = event.expected.toLowerCase().includes('block') ? 'block' :
+                    event.expected.toLowerCase().includes('hard') ? 'hard' :
+                    event.expected.toLowerCase().includes('soft') ? 'soft' : 'auto';
+    tierEl.setAttribute('style', simTierStyle(tierKey));
+  }
+  if (overlay) overlay.classList.add('active');
+
+  // Auto-dismiss after 5 seconds
+  clearTimeout(SIM._calloutTimer);
+  SIM._calloutTimer = setTimeout(dismissCallout, 5000);
+}
+
+function dismissCallout() {
+  const overlay = document.getElementById('sim-callout');
+  if (overlay) overlay.classList.remove('active');
+  clearTimeout(SIM._calloutTimer);
+}
+
+// ==================== SIM CORE LOOP ====================
+
+async function getRoutinePrompt(agentId) {
+  try {
+    const domain = SIM.domain === 'pearson' ? 'legal' : 'healthcare';
+    const res = await fetch('/sim/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: agentId, domain })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.prompt) return data.prompt;
+    }
+  } catch (e) { /* fall through */ }
+  return null;
+}
+
+function pickCannedPrompt(agentId) {
+  const canned = simGetCanned();
+  const prompts = canned[agentId];
+  if (!prompts || prompts.length === 0) return `Routine request from ${agentId}`;
+  return prompts[Math.floor(Math.random() * prompts.length)];
+}
+
+function pickNextAgent() {
+  const agents = simGetAgents();
+  const idx = SIM.currentAgentIdx % agents.length;
+  SIM.currentAgentIdx = (SIM.currentAgentIdx + 1) % agents.length;
+  return agents[idx];
+}
+
+async function runAgentRequest(agentId, prompt) {
+  SIM.activeRequest = true;
+  simHighlightAgent(agentId, true);
+  simActivateLine(agentId, true);
+  simSetCenterStep('Intercepting\u2026', true);
+  simUpdateAgentLast(agentId, 'Processing\u2026');
+
+  const stepNames = {
+    1: 'Intercepting\u2026',
+    2: 'Detecting PII\u2026',
+    3: 'Scoring Risk\u2026',
+    4: 'Dispatching\u2026',
+    5: 'Auditing\u2026',
+  };
+
+  try {
+    await API.streamPipeline(prompt, agentId, (event) => {
+      if (event.step && stepNames[event.step]) {
+        simSetCenterStep(stepNames[event.step], true);
+      }
+      if (event.step === 3 && event.data && event.data.risk_score !== undefined) {
+        simSetCenterRisk(event.data.risk_score);
+      }
+      if (event.step === 'final' && event.data) {
+        const tier = event.data.tier || 'auto';
+        const score = event.data.risk_score || 0;
+        simShowCenterTier(tier);
+        simAddFeedItem(agentId, prompt, event.data);
+        simUpdateAgentLast(agentId, `${tier.toUpperCase()} — Score: ${score}`);
+        SIM.processed++;
+        SIM.totalRisk += score;
+        if (tier === 'block' || tier === 'hard') SIM.blocked++;
+        simUpdateStats();
+        invalidateAuditCache && invalidateAuditCache();
+      }
+    });
+  } catch (e) {
+    console.warn('Sim request error:', e);
+    simSetCenterStep('Error', false);
+  } finally {
+    setTimeout(() => {
+      simHighlightAgent(agentId, false);
+      simActivateLine(agentId, false);
+      simSetCenterStep('Ready', false);
+    }, 1500);
+    SIM.activeRequest = false;
+  }
+}
+
+async function simTick() {
+  if (!SIM.running || SIM.paused || SIM.activeRequest) return;
+
+  const elapsed = SIM.startTime ? Date.now() - SIM.startTime : 0;
+  const scripted = simGetScripted();
+
+  // Check scripted events
+  for (const event of scripted) {
+    if (elapsed >= event.time && !SIM.scriptedFired.has(event.id)) {
+      SIM.scriptedFired.add(event.id);
+      showCalloutOverlay(event);
+      await runAgentRequest(event.agentId, event.prompt);
+      return;
+    }
+  }
+
+  // Routine traffic
+  const agent = pickNextAgent();
+  const prompt = (await getRoutinePrompt(agent.id)) || pickCannedPrompt(agent.id);
+  await runAgentRequest(agent.id, prompt);
+}
+
+// ==================== SIM CONTROLS ====================
+
+async function simStart() {
+  if (SIM.running && !SIM.paused) return;
+
+  if (!SIM.running) {
+    // Full start: switch profile, reset state
+    SIM.processed = 0;
+    SIM.blocked = 0;
+    SIM.totalRisk = 0;
+    SIM.feedItems = [];
+    SIM.scriptedFired = new Set();
+    SIM.currentAgentIdx = 0;
+    SIM.startTime = Date.now();
+
+    // Switch server profile
+    const profile = SIM.domain === 'pearson' ? 'Pearson Hardman Legal' : 'Memorial General Healthcare';
+    try {
+      await API.post('/profile', { profile });
+    } catch (e) {
+      console.warn('Profile switch failed:', e);
+    }
+
+    // Clear feed
+    const feedList = document.getElementById('sim-feed-list');
+    if (feedList) feedList.innerHTML = '';
+    simUpdateStats();
+    simDrawLines();
+    simPopulateAgentNodes();
+  }
+
+  SIM.running = true;
+  SIM.paused = false;
+  simSetStatus('running');
+
+  const startBtn = document.getElementById('sim-btn-start');
+  const pauseBtn = document.getElementById('sim-btn-pause');
+  const resetBtn = document.getElementById('sim-btn-reset');
+  if (startBtn) startBtn.disabled = true;
+  if (pauseBtn) pauseBtn.disabled = false;
+  if (resetBtn) resetBtn.disabled = false;
+
+  // Elapsed timer (clear any existing before creating)
+  clearInterval(SIM.elapsedTimer);
+  SIM.elapsedTimer = setInterval(simUpdateElapsed, 1000);
+
+  // Main tick loop
+  const interval = SIM.speed === 'slow' ? 6000 : 3000;
+  SIM.timer = setInterval(() => simTick(), interval);
+  simTick(); // fire immediately
+}
+
+function simPause() {
+  if (!SIM.running) return;
+  SIM.paused = !SIM.paused;
+  const pauseBtn = document.getElementById('sim-btn-pause');
+  const startBtn = document.getElementById('sim-btn-start');
+
+  if (SIM.paused) {
+    simSetStatus('paused');
+    if (pauseBtn) pauseBtn.textContent = '\u25b6 Resume';
+    if (startBtn) startBtn.disabled = false;
+    clearInterval(SIM.timer);
+    clearInterval(SIM.elapsedTimer);
+  } else {
+    simStart(); // resume = restart timer
+    if (pauseBtn) pauseBtn.textContent = '\u23f8 Pause';
+  }
+}
+
+function simReset() {
+  clearInterval(SIM.timer);
+  clearInterval(SIM.elapsedTimer);
+  SIM.running = false;
+  SIM.paused = false;
+  SIM.timer = null;
+  SIM.startTime = null;
+  SIM.processed = 0;
+  SIM.blocked = 0;
+  SIM.totalRisk = 0;
+  SIM.feedItems = [];
+  SIM.scriptedFired = new Set();
+  SIM.currentAgentIdx = 0;
+  SIM.activeRequest = false;
+
+  simSetStatus('idle');
+  simSetCenterStep('Ready', false);
+
+  const feedList = document.getElementById('sim-feed-list');
+  if (feedList) feedList.innerHTML = '<div class="sim-feed-empty">Simulation not started. Click \u25b6 Start to begin.</div>';
+
+  const feedCount = document.getElementById('sim-feed-count');
+  if (feedCount) feedCount.textContent = '0 events';
+
+  const elapsed = document.getElementById('sim-stat-elapsed');
+  if (elapsed) elapsed.textContent = '0:00';
+
+  simUpdateStats();
+
+  const startBtn = document.getElementById('sim-btn-start');
+  const pauseBtn = document.getElementById('sim-btn-pause');
+  const resetBtn = document.getElementById('sim-btn-reset');
+  if (startBtn) { startBtn.disabled = false; startBtn.textContent = '\u25b6 Start'; }
+  if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = '\u23f8 Pause'; }
+  if (resetBtn) resetBtn.disabled = true;
+
+  simPopulateAgentNodes();
+}
+
+function simSetSpeed(speed) {
+  SIM.speed = speed;
+  document.getElementById('sim-speed-normal').classList.toggle('active', speed === 'normal');
+  document.getElementById('sim-speed-slow').classList.toggle('active', speed === 'slow');
+  if (SIM.running && !SIM.paused) {
+    clearInterval(SIM.timer);
+    const interval = speed === 'slow' ? 6000 : 3000;
+    SIM.timer = setInterval(() => simTick(), interval);
+  }
+}
+
+function simSetDomain(domain) {
+  if (SIM.domain === domain) return;
+  SIM.domain = domain;
+  document.getElementById('sim-domain-pearson').classList.toggle('active', domain === 'pearson');
+  document.getElementById('sim-domain-memorial').classList.toggle('active', domain === 'memorial');
+  if (SIM.running) {
+    simReset();
+  } else {
+    simPopulateAgentNodes();
+  }
+}
+
+function simInit() {
+  simPopulateAgentNodes();
+  simDrawLines();
+  simSetStatus('idle');
+  simUpdateStats();
+}
+
+// ==================== SIM KEYBOARD SHORTCUTS ====================
+
+document.addEventListener('keydown', (e) => {
+  const agentsPage = document.getElementById('page-agents');
+  if (!agentsPage || !agentsPage.classList.contains('active')) return;
+  if (!SIM.running || SIM.paused) return;
+
+  const scripted = simGetScripted();
+  const scriptedMap = {};
+  scripted.forEach((ev, i) => { scriptedMap[String(i + 1)] = ev; });
+
+  const event = scriptedMap[e.key];
+  if (event && !SIM.scriptedFired.has(event.id)) {
+    SIM.scriptedFired.add(event.id);
+    showCalloutOverlay(event);
+    runAgentRequest(event.agentId, event.prompt);
+  }
+});
 
 init();

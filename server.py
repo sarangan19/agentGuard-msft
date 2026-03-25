@@ -251,9 +251,9 @@ async def activity(limit: int = Query(20)):
 @app.get("/metrics")
 async def metrics():
     svcs    = get_services()
-    records = svcs["cosmos"].get_recent_decisions(limit=200)
+    total   = svcs["cosmos"].count_all_decisions()
+    records = svcs["cosmos"].get_recent_decisions(limit=1000)
 
-    total     = len(records)
     blocked   = sum(1 for r in records if r.get("tier") == "block")
     escalated = sum(1 for r in records if r.get("tier") in ("soft", "hard"))
     auto      = sum(1 for r in records if r.get("tier") == "auto")
@@ -484,6 +484,55 @@ async def session_stats(session_id: str = Query(...)):
         "total_cost":       sess["total_cost"],
         "session_id":       session_id,
     }
+
+
+# ── Simulation prompt generation ──────────────────────────────────────────────
+
+class SimGenerateRequest(BaseModel):
+    agent_id: str
+    domain: str  # 'legal' or 'healthcare'
+
+
+@app.post("/sim/generate")
+async def sim_generate(body: SimGenerateRequest):
+    """Generate a realistic agent prompt for the simulation."""
+    svcs = get_services()
+
+    agent_context = {
+        "donna-agent":        "senior paralegal managing client files, scheduling, and legal correspondence at a law firm",
+        "research-bot-001":   "legal research assistant focused on case law and statutes for Matter MATTER-001 (Henderson estate)",
+        "research-bot-002":   "legal research assistant focused on IP litigation research for Matter MATTER-002 (Meridian dispute)",
+        "billing-agent":      "billing and invoicing agent handling time entries and client invoices",
+        "clinical-doc-agent": "clinical documentation agent managing patient medical records",
+        "scheduling-agent":   "patient scheduling agent managing appointments and referrals",
+        "pharmacy-agent":     "pharmacy agent handling prescription verification and drug interactions",
+    }
+
+    domain_vocab = {
+        "legal":      "Use legal terminology. Reference matters, clients, filings, discovery, depositions, or billing.",
+        "healthcare": "Use medical terminology. Reference patients by MRN numbers, appointments, prescriptions, or lab results.",
+    }
+
+    agent_desc = agent_context.get(body.agent_id, f"AI agent in a {body.domain} environment")
+    vocab_hint = domain_vocab.get(body.domain, "")
+
+    system_msg = (
+        f"You generate short, realistic requests that an AI agent would make in a {body.domain} system. "
+        f"Generate one request only. No explanation, no quotes, no preamble. Just the request text itself. "
+        f"Keep it under 80 words. {vocab_hint}"
+    )
+    user_msg = (
+        f"Generate a routine, legitimate request that a {agent_desc} would make. "
+        f"The request should be realistic and specific, referencing actual work this agent would do."
+    )
+
+    openai_svc = svcs.get("openai")
+    if openai_svc and hasattr(openai_svc, "chat_complete"):
+        result = openai_svc.chat_complete(system_msg, user_msg, temperature=0.9, max_tokens=120)
+        if result:
+            return {"prompt": result.strip()}
+
+    raise HTTPException(status_code=503, detail="Prompt generation unavailable")
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
