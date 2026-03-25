@@ -1731,13 +1731,23 @@ html, body {
   to { stroke-dashoffset: -20; }
 }
 
-/* Feed panel (right 40%) */
-.sim-feed-panel {
+/* Right column (feed + judge panel) */
+.sim-right-col {
   flex: 0 0 40%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
+}
+
+/* Feed panel */
+.sim-feed-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
+  min-height: 0;
 }
 
 .sim-feed-header {
@@ -1924,3 +1934,142 @@ html, body {
   transition: background 0.2s;
 }
 .sim-callout-dismiss:hover { background: var(--b1); }
+
+/* ==================== SPEECH BUBBLES ==================== */
+
+.sim-agent-bubble {
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--b1);
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--mid);
+  line-height: 1.4;
+  min-height: 28px;
+  word-break: break-word;
+  transition: background 0.3s, border-color 0.3s, color 0.3s;
+  position: relative;
+}
+.sim-agent-bubble:not(:empty)::before {
+  content: '"';
+  color: var(--dim);
+  font-size: 11px;
+}
+.sim-agent-bubble:not(:empty)::after {
+  content: '"';
+  color: var(--dim);
+  font-size: 11px;
+}
+.sim-agent-node.active .sim-agent-bubble {
+  background: rgba(45,212,191,0.06);
+  border-color: rgba(45,212,191,0.3);
+  color: var(--fg);
+}
+
+/* ==================== JUDGE PANEL ==================== */
+
+.sim-judge-panel {
+  flex-shrink: 0;
+  border-top: 1px solid var(--b1);
+  padding: 12px 14px;
+  background: var(--bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sim-judge-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sim-judge-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(45,212,191,0.12);
+  color: var(--teal);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sim-judge-desc {
+  font-size: 10px;
+  color: var(--dim);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.sim-judge-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg2);
+  border: 1px solid var(--b1);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 11px;
+  color: var(--fg);
+  font-family: var(--font-body, 'DM Sans', sans-serif);
+  resize: vertical;
+  min-height: 52px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.sim-judge-textarea:focus {
+  border-color: var(--teal);
+}
+.sim-judge-textarea::placeholder {
+  color: var(--dim);
+}
+
+.sim-judge-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sim-judge-select {
+  flex: 1;
+  background: var(--bg2);
+  border: 1px solid var(--b1);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  font-family: var(--font-body, 'DM Sans', sans-serif);
+  outline: none;
+  cursor: pointer;
+}
+.sim-judge-select:focus { border-color: var(--teal); }
+
+.sim-judge-send {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--teal);
+  background: rgba(45,212,191,0.1);
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-body, 'DM Sans', sans-serif);
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.sim-judge-send:hover:not(:disabled) { background: rgba(45,212,191,0.22); }
+.sim-judge-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.sim-judge-result {
+  font-size: 10px;
+  min-height: 16px;
+  transition: color 0.3s;
+}
+.sim-judge-result.ok   { color: var(--teal); }
+.sim-judge-result.warn { color: var(--amber); }
+.sim-judge-result.bad  { color: #ef4444; }

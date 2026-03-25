@@ -106,5 +106,72 @@ Phase 2 is IN PROGRESS. `server.py`, `pipeline.py`, and `static/` all exist and 
 - `dashboard.js` module-level caches: `_auditCache` (8s TTL via `AUDIT_CACHE_TTL`), `_repCache` (15s TTL via `REP_CACHE_TTL`), `_escalationsCache`. Call `invalidateAuditCache()` after any new pipeline write to force fresh audit data.
 - Audit table now has **8 columns** (added expand-arrow column as `td:first-child`). `toggleAuditRow(idx, rowEl)` handles row expand/collapse using `display:none` on `.audit-expand-row` elements.
 - Escalations page has two views: `#esc-list-view` (default) and `#esc-detail-view` (shown on row click). `escBack()` resets to list view; `navigateTo('escalations')` calls `escBack()` automatically.
-- Overview donut IDs (populated by `updateStatCards()`): `donut-total`, `donut-auto-val`, `donut-esc-val`, `donut-block-val`. Bubble IDs: `bub-auto`, `bub-soft`, `bub-hard`, `bub-block`.
+- Overview middle row: left card = **Threat Breakdown** (`#threat-breakdown-body`), middle = Live Feed, right = **Agent Activity** (`#agent-activity-body`). Both populated by `renderOverviewSidecards(records)` called from `pollAll()` using `/activity` data. The old donut/bubble elements (`donut-*`, `bub-*`) have been removed.
+- `pii_found` in pipeline data is `[{original, type, placeholder}]` objects — render as `orig → [PLACEHOLDER]` chips using `.pii-chip` / `.pii-orig` / `.pii-ph` CSS classes. Never do `${p}` on these objects.
 - Python file reads on Windows: always `open(file, encoding='utf-8')` — cp1252 codec fails on special chars present in `static/index.html`.
+
+## Agent Simulation (Phase 2B/2C) — Technical Details
+
+### Architecture
+Client-driven simulation loop — JS controls all timing and prompt selection. The server is untouched except for one new endpoint. No changes to `pipeline.py`, `policy_engine.py`, or YAML files.
+
+```
+JS setInterval → simTick() → runAgentRequest(agentId, prompt)
+                                     ↓
+                             API.streamPipeline() → POST /intercept (existing)
+                                     ↓
+                             SSE steps 1-5 → animate UI
+                                     ↓
+                             step='final' → feed item + stats update
+```
+
+### New Server Endpoint
+- `POST /sim/generate` — takes `{agent_id, domain}`, calls `openai_svc.chat_complete()` with agent role context, returns `{prompt: str}`. Raises 503 if OpenAI unavailable. Client silently catches 503 and falls back to canned prompts.
+
+### SIM State Object (`dashboard.js`)
+`SIM` is a module-level object (not in any class). Key fields: `running`, `paused`, `domain` (`'pearson'`|`'memorial'`), `speed` (`'normal'`|`'slow'`), `timer` (setInterval ref), `elapsedTimer` (setInterval ref), `startTime` (Date.now() snapshot), `processed`, `blocked`, `totalRisk`, `feedItems` (array, max 50), `scriptedFired` (Set of event IDs), `currentAgentIdx` (round-robin pointer), `activeRequest` (bool guard against concurrent requests).
+
+### Agent Positions
+Both PEARSON_AGENTS and MEMORIAL_AGENTS assign a `pos` field (`'tl'`/`'tr'`/`'bl'`/`'br'`) that maps to DOM IDs `sim-node-{pos}`, `sim-avatar-{pos}`, `sim-name-{pos}`, `sim-role-{pos}`, `sim-dot-{pos}`, `sim-last-{pos}`.
+
+### Scripted Events
+Timing is checked on every `simTick()` call using `Date.now() - SIM.startTime`. An event fires at most once per simulation run — `SIM.scriptedFired` Set prevents re-firing. Scripted events take the full tick (return early, no routine traffic that tick). Keyboard shortcuts 1–4 use `simGetScripted()` (domain-aware), so they fire the correct domain's events.
+
+**Pearson Hardman (4 events):**
+| Key | Time | Agent | Expected |
+|-----|------|-------|----------|
+| 1 | T+25s | research-bot-001 | soft escalation (cross-matter: MATTER-002 forbidden) |
+| 2 | T+50s | billing-agent | hard escalation (out_of_scope: access_case_details) |
+| 3 | T+75s | donna-agent | block (bulk export + SSN/address PII) |
+| 4 | T+100s | research-bot-002 | block (MATTER-001 forbidden + special category) |
+
+**Memorial General (1 event):**
+| Key | Time | Agent | Expected |
+|-----|------|-------|----------|
+| 1 | T+25s | pharmacy-agent | block (psychiatric + substance abuse records) |
+
+### Callout Overlay
+`showCalloutOverlay(event)` adds `.active` to `#sim-callout` (CSS `opacity:0 → 1`, `pointer-events:none → auto`). Auto-dismisses after 5 seconds via `SIM._calloutTimer`. `dismissCallout()` removes `.active`. The overlay is `position:fixed; z-index:1000` so it covers the entire viewport.
+
+### SVG Lines
+`simDrawLines()` uses `getBoundingClientRect()` on `.sim-agent-area` to compute absolute pixel positions for the 4 corners and the center, then inserts `<line>` elements into `#sim-svg` (absolute-positioned SVG overlay, `pointer-events:none`, `z-index:2`). Lines get IDs `sim-line-{pos}`. Animation uses CSS `stroke-dasharray` + `@keyframes sim-dash` (dashoffset march). `simActivateLine(agentId, on)` toggles `opacity` and the animation. Lines must be redrawn on every `simStart()` call because the SVG is wiped on reset and layout may have changed.
+
+### Feed Panel
+`simAddFeedItem()` prepends a `.sim-feed-item` div to `#sim-feed-list`. Click toggles `.expanded` class — CSS shows `.sim-feed-detail` (full prompt + risk score) when expanded. `SIM.feedItems` array is capped at 50 (`unshift` + `pop`). The DOM is NOT capped separately — only `SIM.feedItems` array is trimmed, so the DOM can accumulate more than 50 elements on very long runs. This is acceptable for a demo.
+
+### Timer Management
+- `SIM.timer` — the main `setInterval` tick loop. Speed change calls `clearInterval(SIM.timer)` then creates a new one with the new interval.
+- `SIM.elapsedTimer` — 1s interval for the elapsed display. Always cleared before re-creating (guard added to prevent leak on pause/resume).
+- Both timers are cleared in `simReset()` and `simPause()`.
+
+### Profile Switching
+`simStart()` calls `API.post('/profile', {profile})` before the first tick. This switches the server-side session to the correct YAML policy so the pipeline evaluates requests under the right agent rules.
+
+### `navigateTo('agents')` hook
+`simInit()` is called each time the agents page is shown. It calls `simPopulateAgentNodes()` (fills agent names/icons/roles from current domain), `simDrawLines()` (redraws SVG), and `simJudgeInit()` (populates judge panel dropdown). Safe to call multiple times.
+
+### Speech Bubbles (Addition — 2026-03-25)
+Each agent node has a `#sim-bubble-{pos}` div. `simSetAgentBubble(agentId, text)` truncates to 90 chars and sets it. Called in `runAgentRequest` BEFORE `simHighlightAgent` so judges see the request text before the line animation starts. Cleared after 1.5s in the `finally` timeout alongside highlight removal. Also cleared in `simPopulateAgentNodes()` on reset/domain switch.
+
+### Judge Interaction Panel (Addition — 2026-03-25)
+`.sim-judge-panel` sits inside `.sim-right-col` below the live feed. The right column is a flex column; feed takes `flex:1`, judge panel is `flex-shrink:0`. `simJudgeInit()` populates `#sim-judge-agent` dropdown from `simGetAgents()` — called from `simInit()` and `simSetDomain()`. `simJudgeSend()` reads textarea + select and calls `runJudgeRequest(agentId, prompt)`. `runJudgeRequest` is a parallel variant of `runAgentRequest` that does NOT touch `SIM.activeRequest` — judge requests never block the auto-sim loop and run concurrently with routine traffic. Result shows in `#sim-judge-result` with color-coded class (`ok`/`warn`/`bad`). Send button disabled while request is in flight, re-enabled on `final` event or error.

@@ -1525,6 +1525,8 @@ function simPopulateAgentNodes() {
     if (last) last.textContent = 'Idle';
     const dot = document.getElementById(`sim-dot-${pos}`);
     if (dot) { dot.className = 'sim-status-dot sm'; }
+    const bubble = document.getElementById(`sim-bubble-${pos}`);
+    if (bubble) bubble.textContent = '';
   });
 }
 
@@ -1598,6 +1600,23 @@ function simUpdateAgentLast(agentId, text) {
   if (!ag) return;
   const last = document.getElementById(`sim-last-${ag.pos}`);
   if (last) last.textContent = text;
+}
+
+function simSetAgentBubble(agentId, text) {
+  const agents = simGetAgents();
+  const ag = agents.find(a => a.id === agentId);
+  if (!ag) return;
+  const bubble = document.getElementById(`sim-bubble-${ag.pos}`);
+  if (!bubble) return;
+  if (!text) { bubble.textContent = ''; return; }
+  bubble.textContent = text.length > 90 ? text.slice(0, 90) + '\u2026' : text;
+}
+
+function simClearAllBubbles() {
+  ['tl', 'tr', 'bl', 'br'].forEach(pos => {
+    const b = document.getElementById(`sim-bubble-${pos}`);
+    if (b) b.textContent = '';
+  });
 }
 
 // ==================== SIM SVG LINES ====================
@@ -1801,6 +1820,7 @@ function pickNextAgent() {
 
 async function runAgentRequest(agentId, prompt) {
   SIM.activeRequest = true;
+  simSetAgentBubble(agentId, prompt);  // show request text before animation
   simHighlightAgent(agentId, true);
   simActivateLine(agentId, true);
   simSetCenterStep('Intercepting\u2026', true);
@@ -1843,6 +1863,7 @@ async function runAgentRequest(agentId, prompt) {
       simHighlightAgent(agentId, false);
       simActivateLine(agentId, false);
       simSetCenterStep('Ready', false);
+      simSetAgentBubble(agentId, '');
     }, 1500);
     SIM.activeRequest = false;
   }
@@ -2000,6 +2021,7 @@ function simSetDomain(domain) {
   } else {
     simPopulateAgentNodes();
   }
+  simJudgeInit();
 }
 
 function simInit() {
@@ -2007,6 +2029,96 @@ function simInit() {
   simDrawLines();
   simSetStatus('idle');
   simUpdateStats();
+  simJudgeInit();
+}
+
+// ==================== JUDGE INTERACTION PANEL ====================
+
+function simJudgeInit() {
+  const select = document.getElementById('sim-judge-agent');
+  if (!select) return;
+  select.innerHTML = '';
+  simGetAgents().forEach(ag => {
+    const opt = document.createElement('option');
+    opt.value = ag.id;
+    opt.textContent = `${ag.icon} ${ag.name}`;
+    select.appendChild(opt);
+  });
+  const result = document.getElementById('sim-judge-result');
+  if (result) { result.textContent = ''; result.className = 'sim-judge-result'; }
+}
+
+async function runJudgeRequest(agentId, prompt) {
+  // Parallel to auto-sim — does NOT touch SIM.activeRequest
+  simSetAgentBubble(agentId, prompt);
+  simHighlightAgent(agentId, true);
+  simActivateLine(agentId, true);
+
+  const stepNames = { 1: 'Intercepting\u2026', 2: 'Detecting PII\u2026', 3: 'Scoring Risk\u2026', 4: 'Dispatching\u2026', 5: 'Auditing\u2026' };
+
+  try {
+    await API.streamPipeline(prompt, agentId, (event) => {
+      if (event.step && stepNames[event.step]) simSetCenterStep(stepNames[event.step], true);
+      if (event.step === 3 && event.data && event.data.risk_score !== undefined) simSetCenterRisk(event.data.risk_score);
+      if (event.step === 'final' && event.data) {
+        const tier = event.data.tier || 'auto';
+        const score = event.data.risk_score || 0;
+        simShowCenterTier(tier);
+        simAddFeedItem(agentId, prompt, event.data);
+        SIM.processed++;
+        SIM.totalRisk += score;
+        if (tier === 'block' || tier === 'hard') SIM.blocked++;
+        simUpdateStats();
+        invalidateAuditCache && invalidateAuditCache();
+
+        const result = document.getElementById('sim-judge-result');
+        if (result) {
+          const cls = tier === 'block' ? 'bad' : (tier === 'hard' || tier === 'soft') ? 'warn' : 'ok';
+          result.className = `sim-judge-result ${cls}`;
+          result.textContent = `Result: ${tier.toUpperCase()} — Risk Score ${score}`;
+        }
+        const btn = document.getElementById('sim-judge-btn');
+        if (btn) btn.disabled = false;
+      }
+    });
+  } catch (e) {
+    console.warn('Judge request error:', e);
+    const result = document.getElementById('sim-judge-result');
+    if (result) { result.className = 'sim-judge-result bad'; result.textContent = 'Error: pipeline request failed'; }
+    const btn = document.getElementById('sim-judge-btn');
+    if (btn) btn.disabled = false;
+  } finally {
+    setTimeout(() => {
+      simHighlightAgent(agentId, false);
+      simActivateLine(agentId, false);
+      simSetCenterStep('Ready', false);
+      simSetAgentBubble(agentId, '');
+    }, 1500);
+  }
+}
+
+function simJudgeSend() {
+  const textarea = document.getElementById('sim-judge-prompt');
+  const select = document.getElementById('sim-judge-agent');
+  const btn = document.getElementById('sim-judge-btn');
+  const result = document.getElementById('sim-judge-result');
+
+  const prompt = (textarea && textarea.value.trim()) || '';
+  const agentId = (select && select.value) || '';
+
+  if (!prompt) {
+    if (result) { result.className = 'sim-judge-result warn'; result.textContent = 'Please enter a request first.'; }
+    return;
+  }
+  if (!agentId) {
+    if (result) { result.className = 'sim-judge-result warn'; result.textContent = 'Please select an agent.'; }
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  if (result) { result.className = 'sim-judge-result'; result.textContent = 'Sending to AgentGuard\u2026'; }
+
+  runJudgeRequest(agentId, prompt);
 }
 
 // ==================== SIM KEYBOARD SHORTCUTS ====================
