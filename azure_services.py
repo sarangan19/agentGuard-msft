@@ -191,6 +191,23 @@ class CosmosDBService:
             return False
 
     # ----------------------------------------------------------
+    def count_all_decisions(self) -> int:
+        """Return the true total count of audit records via COUNT(1)."""
+        if self.container is None:
+            return 0
+        try:
+            results = list(
+                self.container.query_items(
+                    query="SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.tier)",
+                    enable_cross_partition_query=True,
+                )
+            )
+            return results[0] if results else 0
+        except Exception as exc:
+            logger.error("CosmosDB count_all_decisions error: %s", exc)
+            return 0
+
+    # ----------------------------------------------------------
     def get_recent_decisions(self, limit: int = 20) -> list[dict]:
         """
         Query the most recent audit records, ordered by timestamp descending.
@@ -232,14 +249,34 @@ class CosmosDBService:
     def confirm_decision(self, record_id: str, session_id: str, justification: str = "") -> bool:
         """
         Mark an audit decision as human-confirmed.
-        Fetches the existing record, stamps intervention_confirmed=True,
-        stores any justification text, then re-upserts the full document.
-        Returns True on success, False on failure (record not found, Cosmos unavailable).
+        Tries a fast direct read first (needs correct partition key = session_id).
+        Falls back to a cross-partition query if the session_id doesn't match
+        (e.g. record was written by a different session or from the terminal).
         """
         if self.container is None:
             return False
         try:
-            record = self.container.read_item(item=record_id, partition_key=session_id)
+            # Fast path: direct read when we have the right partition key
+            record = None
+            if session_id:
+                try:
+                    record = self.container.read_item(item=record_id, partition_key=session_id)
+                except Exception:
+                    record = None  # partition key mismatch → fall through
+
+            # Fallback: cross-partition query by document id
+            if record is None:
+                results = list(self.container.query_items(
+                    query="SELECT * FROM c WHERE c.id = @id",
+                    parameters=[{"name": "@id", "value": record_id}],
+                    enable_cross_partition_query=True,
+                ))
+                record = results[0] if results else None
+
+            if record is None:
+                logger.error("confirm_decision: record %s not found", record_id)
+                return False
+
             record["intervention_confirmed"] = True
             record["intervention_timestamp"] = datetime.now(timezone.utc).isoformat()
             if justification:

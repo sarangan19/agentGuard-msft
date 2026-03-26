@@ -1,6 +1,6 @@
 # AgentGuard — Implementation Progress
 
-Last updated: 2026-03-24
+Last updated: 2026-03-25
 
 ---
 
@@ -33,10 +33,10 @@ Before starting any task from this file, read `TASK_MANAGER.md`.
 
 | # | Component | Status | Notes |
 |---|-----------|--------|-------|
-| A | FastAPI API server | Not started | `server.py` — wraps `AgentGuardMiddleware` with HTTP endpoints |
-| B | Simulated agents (Pearson Hardman) | Not started | 4 agents: donna-agent, research-bot-001, research-bot-002, billing-agent |
-| C | Simulated agents (Memorial General) | Not started | 3 agents: clinical-doc-agent, billing-agent, pharmacy-agent. After B is complete. |
-| D | HTML dashboard migration | Not started | Replaces Streamlit. Static files served from FastAPI. Domain switcher dropdown. |
+| A | FastAPI API server | Done | `server.py` with full REST+SSE endpoints; HTML dashboard served from static/ |
+| B | Simulated agents (Pearson Hardman) | Done | 4 agents fully wired; 4 scripted events (T+25/50/75/100s); keyboard shortcuts 1-4; live SVG animations |
+| C | Simulated agents (Memorial General) | Done | 4 agents; 1 scripted event (pharmacy-agent, T+25s); domain switcher in sim controls |
+| D | HTML dashboard migration | Done | Full 5-zone simulation grid in #page-agents; CSS sim styles; /sim/generate endpoint |
 
 ---
 
@@ -120,33 +120,30 @@ Before starting any task from this file, read `TASK_MANAGER.md`.
 ---
 
 ## Phase 2A — FastAPI API Server
-**Status:** Not started — begins after Changes 2–7 are done and tested
-**Files:** New `server.py`
-**What to do:** Thin HTTP wrapper around `AgentGuardMiddleware`. Endpoints: `POST /intercept`, `POST /confirm`, `GET /status/{id}`, `GET /` (serves HTML dashboard). Auto-generated `/docs` via FastAPI.
+**Status:** Done
+**Files:** `server.py`, `pipeline.py`, `static/`
+**What was done:** Full FastAPI server with REST + SSE endpoints. Serves HTML/CSS/JS dashboard from `static/`. Key endpoints: `POST /intercept` (SSE streaming pipeline), `POST /confirm`, `POST /profile`, `POST /agent`, `GET /activity`, `GET /metrics`, `GET /escalations`, `GET /reputation`, `GET /health`, `GET /compliance/report`, `GET /session/stats`, `POST /sim/generate`. `pipeline.py` is the shared pipeline called by both `app.py` and `server.py`.
 
 ---
 
 ## Phase 2B — Simulated Agents (Pearson Hardman)
-**Status:** Not started — begins after Phase 2A
-**Files:** New `simulations/pearson_hardman/` directory
-**What to do:** Hybrid simulation — scripted dramatic moments + AI-generated routine traffic. 4 agents: donna-agent, research-bot-001, research-bot-002, billing-agent. Must include these scripted moments:
-- research-bot-001 cross-matter access to MATTER-2024-002 → BLOCK, score 98
-- donna-agent canary token detection → BLOCK, canary_triggered in Cosmos DB
-- billing-agent bulk export attempt → BLOCK
+**Status:** Done
+**Files:** `static/dashboard.js`, `static/dashboard.css`, `static/index.html`
+**What was done:** Client-driven simulation loop. 4 agents (donna, research-001, research-002, billing) in 2×2 grid with animated SVG lines. 4 scripted events at T+25/50/75/100s. Keyboard shortcuts 1–4 fire scripted events on demand. Routine traffic via `/sim/generate` with canned fallback. Max 2 simultaneous requests (`SIM.activeCount`). Speech bubbles show request text per agent before line animation. Judge panel ("Try It Yourself") with textarea + agent dropdown + queue.
 
 ---
 
 ## Phase 2C — Simulated Agents (Memorial General)
-**Status:** Not started — begins after Phase 2B is complete
-**Files:** New `simulations/memorial_general/` directory
-**What to do:** 3 agents: clinical-doc-agent, billing-agent, pharmacy-agent. Must include: clinical-doc-agent accessing psychiatric records outside treating specialist context → BLOCK, special category protection logged.
+**Status:** Done
+**Files:** `static/dashboard.js`
+**What was done:** 4 agents (clinical-doc, scheduling, billing, pharmacy). 1 scripted event at T+25s (pharmacy-agent → psychiatric + substance abuse records → BLOCK). Domain switcher resets sim and repopulates all agent UI.
 
 ---
 
 ## Phase 2D — HTML Dashboard Migration
-**Status:** Not started — begins after Phase 2A
-**Files:** Static HTML/CSS/JS files served from FastAPI
-**What to do:** Replace Streamlit dashboard with the existing HTML dashboard (`page_dashboard_themes.html` as base). Domain switcher dropdown triggers policy engine reload. Real-time Cosmos DB reads. Compliance report export. One server, one URL, no separate Streamlit process.
+**Status:** Done
+**Files:** `static/index.html`, `static/dashboard.css`, `static/dashboard.js`
+**What was done:** Full HTML/CSS/JS dashboard served from FastAPI. All pages: Overview, Demo Pipeline, Audit Log, Escalations, Analytics, Compliance, Architecture, Agent Reputation, Agent Simulation. Domain switcher posts to `/profile`, reloads YAML with no server restart.
 
 ---
 
@@ -203,6 +200,33 @@ Before starting any task from this file, read `TASK_MANAGER.md`.
 **Status:** Done
 **Files:** `policy_engine.py`, `agentguard_hipaa.yaml`, `agentguard_lawfirm.yaml`, `app.py`
 **What was done:** Added `_check_scope_violation()` to `PolicyEngine` — reads `out_of_scope_actions` list from agent YAML, matches regex patterns against request text, returns BLOCK decision (score_boost=90) with `agent_scope_violation: True` and `scope_violation_action` in policy_flags. Reason string format: `"{agent_id} is not authorised to {description} — this agent is scoped to {role_description} only."` Called first in `_evaluate_generic()` before entity checks. Added `out_of_scope_actions` to: scheduling-agent (financial transactions, clinical record modification), billing-agent HIPAA (external emails, treatment plan access), pharmacy-agent (billing claims, scheduling), billing-agent legal (case strategy, client communications, audit trail modification). Updated `risk_reasoning` in audit record to use `policy_decision["reason"]` when `agent_scope_violation` flag is set.
+
+---
+
+## Standalone — Agent Simulation Page (Phase 2B/2C)
+**Status:** Done — 2026-03-25
+**Files:** `server.py`, `static/index.html`, `static/dashboard.css`, `static/dashboard.js`
+**What was done:** Full live agent simulation page replacing the static placeholder. 5-zone layout: control bar, 2×2 agent grid with SVG overlay, center middleware node, live feed panel, stats bar. `POST /sim/generate` endpoint generates AI prompts per agent/domain. Callout overlay for scripted dramatic events. `navigateTo('agents')` calls `simInit()`.
+
+---
+
+## Standalone — Sim: Speech Bubbles + Judge Panel
+**Status:** Done — 2026-03-25
+**Files:** `static/index.html`, `static/dashboard.css`, `static/dashboard.js`
+**What was done:**
+- **Speech bubbles** (`#sim-bubble-{pos}`): each agent card shows the most recent request text (90 char truncated). Set before line animation so judges read the prompt before seeing the result. Cleared 1.5s after completion.
+- **Judge panel** ("Try It Yourself"): textarea + agent dropdown + Send button below live feed. `runJudgeRequest()` runs in parallel to auto-sim — does not touch `SIM.activeCount`. Multiple judge sends queue via `SIM.judgeQueue`, drained in order after each completes.
+
+---
+
+## Standalone — Sim: Speed + Concurrency Fixes
+**Status:** Done — 2026-03-25
+**Files:** `static/dashboard.js`
+**What was done:**
+- Removed `activeRequest` gate from `simTick` — sim now fires on every interval regardless of in-flight requests (was causing 25s+ gaps between prompts).
+- Added `SIM.activeCount` to cap simultaneous auto-sim pipeline calls at 2. `simTick` skips if `activeCount >= 2`.
+- Judge requests use separate `SIM.judgeRunning` + `SIM.judgeQueue` — fully independent of auto-sim concurrency.
+- Fixed judge panel: `min-height:0` on `.sim-feed-list` prevents flex overflow hiding the judge panel; textarea spans full panel width; dropdown uses plain text (no ZWJ emoji, which were invisible in Windows OS dropdowns).
 
 ---
 

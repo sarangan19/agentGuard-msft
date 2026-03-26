@@ -20,3 +20,6 @@ fix_list.md
 # Images
 artifacts/image.png
 .worktrees/
+
+#markdown files
+.md

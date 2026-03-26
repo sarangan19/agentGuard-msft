@@ -57,6 +57,7 @@ from pipeline import (
     _COST_PER_REQUEST,
     build_compliance_report,
     make_pdf_bytes,
+    make_audit_pdf_bytes,
 )
 # DEPLOYMENT_PROFILES is imported from policy_engine above
 
@@ -175,7 +176,22 @@ class AgentRequest(BaseModel):
 # ── Static files + root ───────────────────────────────────────────────────────
 
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
+
+
+# Middleware: disable browser caching for .js and .css files in dev
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/static/") and (path.endswith(".js") or path.endswith(".css")):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+app.add_middleware(NoCacheStaticMiddleware)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -472,6 +488,33 @@ async def compliance_report(
         media_type="text/plain",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── 2g: Audit log PDF export ──────────────────────────────────────────────────
+
+@app.get("/audit/report")
+async def audit_report(
+    session_id: str = Query(...),
+    format: str = Query("pdf"),
+):
+    svcs    = get_services()
+    sess    = get_session(session_id)
+    profile = sess["deployment_profile"]
+    records = svcs["cosmos"].get_recent_decisions(limit=500)
+
+    if format == "pdf":
+        try:
+            pdf_bytes = make_audit_pdf_bytes(records, profile)
+            filename  = f"agentguard_audit_{profile.lower().replace(' ', '_')}.pdf"
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except ImportError:
+            raise HTTPException(status_code=501, detail="fpdf2 not installed — PDF export unavailable")
+
+    raise HTTPException(status_code=400, detail="Only PDF format supported for audit export")
 
 
 # ── Session stats (sidebar cost/calls) ───────────────────────────────────────

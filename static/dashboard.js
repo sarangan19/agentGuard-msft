@@ -466,8 +466,8 @@ function scoreColor(s) {
 function decisionColor(d) {
   if (!d) return 'var(--mid)';
   const upper = String(d).toUpperCase();
-  if (upper === 'ALLOWED' || upper === 'ALLOW' || upper === 'AUTO_EXECUTE') return 'var(--green)';
-  if (upper === 'ESCALATED' || upper === 'ESCALATE' || upper.includes('SOFT') || upper.includes('HARD')) return 'var(--amber)';
+  if (upper.includes('AUTO') || upper === 'ALLOWED' || upper === 'ALLOW' || upper === 'AUTO_EXECUTE') return 'var(--green)';
+  if (upper.includes('SOFT') || upper.includes('HARD') || upper === 'ESCALATED' || upper === 'ESCALATE') return 'var(--amber)';
   return 'var(--red)';
 }
 
@@ -629,10 +629,14 @@ function activateStepDone(stepNum) {
     }, 350);
   }
 
-  // Mark the next step as active (pending → active)
+  // Mark the next step as active and show loading placeholder
   const nextCard = document.getElementById('step-' + (n + 1));
   if (nextCard && !nextCard.classList.contains('done')) {
     nextCard.className = 'step-card active';
+    const nextExpand = document.getElementById('step-' + (n + 1) + '-expand');
+    if (nextExpand && !nextExpand.innerHTML.trim()) {
+      nextExpand.innerHTML = '<div class="step-expand-content" style="opacity:0.45">Processing…</div>';
+    }
   }
 }
 
@@ -640,11 +644,17 @@ function updateStepUI(step, data) {
   if (!data) return;
 
   if (step === 1 || step === '1') {
-    // Step 1: intercept — nothing extra to show
+    const expandEl = document.getElementById('step-1-expand');
+    if (expandEl) {
+      const promptEl = document.getElementById('demo-prompt');
+      const txt = (promptEl ? promptEl.value.trim() : '');
+      const snippet = txt.length > 110 ? txt.substring(0, 110) + '…' : txt;
+      expandEl.innerHTML = `<div class="step-expand-content"><span style="color:var(--dim);font-size:10px">INTERCEPTED</span><br>${snippet}</div>`;
+    }
   }
 
   if (step === 2 || step === '2') {
-    // PII detection results
+    // PII detection results — right panel
     const el = document.getElementById('pii-detected-list');
     if (el) {
       const piiFound = data.pii_found || data.pii || [];
@@ -659,6 +669,24 @@ function updateStepUI(step, data) {
           }
           return `<span class="chip purple" style="margin:2px;display:inline-block">${p}</span>`;
         }).join('');
+      }
+    }
+    // Step expand
+    const expandEl = document.getElementById('step-2-expand');
+    if (expandEl) {
+      const piiFound = data.pii_found || data.pii || [];
+      if (piiFound.length === 0) {
+        expandEl.innerHTML = '<div class="step-expand-content"><span style="color:var(--green)">✓ No PII detected</span></div>';
+      } else {
+        const chips = piiFound.map(p => {
+          if (typeof p === 'object' && p !== null) {
+            const orig = p.original || p.text || '?';
+            const ph   = p.placeholder || p.type  || '?';
+            return `<span class="pii-chip chip purple"><span class="pii-orig">${orig}</span><span class="pii-arrow">→</span><code class="pii-ph">${ph}</code></span>`;
+          }
+          return `<span class="chip purple">${p}</span>`;
+        }).join('');
+        expandEl.innerHTML = `<div class="step-expand-content">${chips}</div>`;
       }
     }
   }
@@ -677,10 +705,18 @@ function updateStepUI(step, data) {
     }
     if (numEl) numEl.textContent = score;
     if (subEl) subEl.textContent = 'RISK SCORE';
+    // Step expand
+    const expandEl = document.getElementById('step-3-expand');
+    if (expandEl) {
+      const color = scoreColor(score);
+      const reasoning = data.reasoning || data.reason || '';
+      const snip = reasoning ? (reasoning.length > 90 ? reasoning.substring(0, 90) + '…' : reasoning) : '';
+      expandEl.innerHTML = `<div class="step-expand-content"><span style="color:${color};font-weight:700;font-size:14px">${score}</span><span style="color:var(--dim)"> / 100</span>${snip ? `<br><span style="opacity:0.6">${snip}</span>` : ''}</div>`;
+    }
   }
 
   if (step === 4 || step === '4') {
-    // Tier display
+    // Tier display — right panel
     const tierWrap = document.getElementById('tier-display-wrap');
     if (tierWrap && data.tier) {
       tierWrap.style.display = 'block';
@@ -702,6 +738,16 @@ function updateStepUI(step, data) {
       };
       if (tierAction) tierAction.textContent = actions[t] || 'Action: See policy';
     }
+    // Step expand
+    const expandEl4 = document.getElementById('step-4-expand');
+    if (expandEl4 && data.tier) {
+      const t = (data.tier || 'auto').toLowerCase();
+      const tierColors = { auto: 'var(--green)', soft: 'var(--amber)', hard: '#f87171', block: 'var(--red)' };
+      const actionLabels = { auto: 'Auto-execute', soft: 'Human confirmation required', hard: 'Business justification required', block: 'Immediately blocked' };
+      const col = tierColors[t] || 'var(--teal)';
+      const act = actionLabels[t] || 'See policy';
+      expandEl4.innerHTML = `<div class="step-expand-content"><span style="color:${col};font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.04em">${t}</span> <span style="color:var(--dim)">· ${act}</span></div>`;
+    }
   }
 
   if (step === 5 || step === '5') {
@@ -709,6 +755,12 @@ function updateStepUI(step, data) {
     const cosmosEl = document.getElementById('cosmos-content');
     if (cosmosEl) {
       cosmosEl.innerHTML = renderCosmosJSON(data);
+    }
+    // Step expand
+    const expandEl5 = document.getElementById('step-5-expand');
+    if (expandEl5) {
+      const recordId = data.id || data.record_id || data.cosmos_id || '';
+      expandEl5.innerHTML = `<div class="step-expand-content"><span style="color:var(--green)">✓ Persisted to Cosmos DB</span>${recordId ? `<br><code style="font-size:10px;color:var(--dim);word-break:break-all">${recordId}</code>` : ''}</div>`;
     }
   }
 }
@@ -897,6 +949,8 @@ function resetPipelineSteps() {
       statusEl.textContent = '';
       statusEl.style.cssText = '';
     }
+    const expandEl = document.getElementById(`step-${i}-expand`);
+    if (expandEl) expandEl.innerHTML = '';
   });
 }
 
@@ -931,14 +985,19 @@ async function renderAuditTable(filter) {
     return;
   }
 
+  const _tierDecisionLabels = { auto: 'Auto-approved', soft: 'Soft escalation', hard: 'Hard escalation', block: 'Blocked' };
   tbody.innerHTML = filtered.map((r, idx) => {
-    const tier     = (r.tier || 'low').toLowerCase();
+    const tier     = (r.tier || 'auto').toLowerCase();
     const score    = r.risk_score !== undefined ? r.risk_score : (r.score !== undefined ? r.score : 0);
     const agent    = r.agent_id || r.agent || 'unknown';
     const action   = r.original_text || r.action || '—';
     const ts       = r.timestamp ? new Date(r.timestamp).toLocaleTimeString('en-GB') : (r.ts || '—');
-    const decision = r.decision || r.action_taken || '—';
-    const pii      = r.pii_found || r.pii || [];
+    const decision = _tierDecisionLabels[tier] || tier.toUpperCase();
+    const piiCount = r.pii_entities_detected !== undefined ? r.pii_entities_detected
+                   : (r.entity_count !== undefined ? r.entity_count : 0);
+    const piiCell  = piiCount > 0
+      ? `<span style="color:var(--pink);font-weight:600">${piiCount}</span><span style="color:var(--dim);font-size:10px"> entity${piiCount !== 1 ? 'ies' : ''}</span>`
+      : `<span style="color:var(--green);font-size:11px">✓ 0</span>`;
     return `
       <tr class="audit-data-row" data-audit-idx="${idx}" onclick="toggleAuditRow(${idx}, this)">
         <td style="color:var(--dim);font-size:10px;padding:8px 6px">›</td>
@@ -948,7 +1007,7 @@ async function renderAuditTable(filter) {
         <td><span class="feed-tier tier-${tier}">${tier.toUpperCase()}</span></td>
         <td style="color:${scoreColor(score)};font-family:'DM Sans',sans-serif;font-weight:800;font-size:15px">${score}</td>
         <td style="color:${decisionColor(decision)}">${decision}</td>
-        <td>${pii.length>0 ? pii.slice(0,2).map(p=>`<span class="chip">${p}</span>`).join(' ') : '<span style="color:var(--dim)">—</span>'}</td>
+        <td>${piiCell}</td>
       </tr>
       <tr class="audit-expand-row" id="audit-expand-${idx}" style="display:none">
         <td colspan="8">
@@ -1368,13 +1427,51 @@ function initCharts() {
   }
 }
 
+// ==================== PDF DOWNLOAD HELPER ====================
+async function _downloadPDF(url, fallbackFilename) {
+  showToast('Generating PDF…');
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const text = await res.text();
+      showToast('Export failed: ' + (text.slice(0, 100) || 'Server error'));
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : fallbackFilename;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    showToast('Downloaded ' + filename);
+  } catch (e) {
+    showToast('Export failed: ' + e.message);
+  }
+}
+
 // ==================== COMPLIANCE EXPORT ====================
 function exportCompliance() {
   window.location.href = '/compliance/report?format=txt&session_id=' + API.sessionId;
 }
 
 function exportCompliancePDF() {
-  window.location.href = '/compliance/report?format=pdf&session_id=' + API.sessionId;
+  _downloadPDF(
+    '/compliance/report?format=pdf&session_id=' + API.sessionId,
+    'agentguard_compliance.pdf'
+  );
+}
+
+// ==================== AUDIT LOG PDF EXPORT ====================
+function exportAuditPDF() {
+  _downloadPDF(
+    '/audit/report?format=pdf&session_id=' + API.sessionId,
+    'agentguard_audit_log.pdf'
+  );
 }
 
 // ==================== QUICK RUN ====================

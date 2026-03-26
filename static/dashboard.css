@@ -78,7 +78,8 @@ html, body {
 }
 
 .sb-logo {
-  padding: 20px 16px 18px;
+  height: 52px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--b1);
   display: flex;
   align-items: center;
@@ -855,8 +856,35 @@ html, body {
   color: var(--green);
 }
 
+.step-body { flex: 1; min-width: 0; }
 .step-title  { font-size: 12px; color: var(--white); font-weight: 500; margin-bottom: 2px; }
 .step-detail { font-size: 11px; color: var(--mid); }
+
+.step-expand {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  margin-top: 0;
+  transition: max-height 0.38s ease, opacity 0.28s ease, margin-top 0.38s ease;
+}
+.step-card.active .step-expand {
+  max-height: 200px;
+  opacity: 1;
+  margin-top: 8px;
+}
+.step-card.done .step-expand {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+}
+.step-expand-content {
+  padding-top: 7px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  font-size: 11px;
+  color: var(--mid);
+  line-height: 1.6;
+}
+.step-expand-content .pii-chip { margin: 2px 3px 2px 0; display: inline-flex; }
 
 .step-status {
   margin-left: auto;

@@ -197,18 +197,181 @@ def build_compliance_report(profile: str, cosmos_records: list) -> str:
 
 
 def make_pdf_bytes(report_text: str, profile: str) -> bytes:
-    """Generate PDF from report text using fpdf2. Returns raw PDF bytes."""
+    """Generate styled compliance report PDF using fpdf2. Returns raw PDF bytes."""
     from fpdf import FPDF  # lazy import
+    from fpdf.enums import XPos, YPos
+    from datetime import datetime, timezone
+
+    def _safe(s: str) -> str:
+        return str(s).encode("latin-1", "replace").decode("latin-1")
+
+    def _mc(pdf, w, h, text):
+        """multi_cell wrapper that resets X to left margin after each call (fpdf2 2.8 fix)."""
+        pdf.multi_cell(w, h, text, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
     pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=25)
     pdf.add_page()
-    pdf.set_margins(20, 20, 20)
-    title_line, *body_lines = report_text.split("\n")
-    pdf.set_font("Courier", style="B", size=12)
-    pdf.multi_cell(0, 7, title_line)
+
+    # Header strip
+    pdf.set_fill_color(15, 23, 42)
+    pdf.rect(0, 0, 210, 28, "F")
+    pdf.set_font("Helvetica", style="B", size=13)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(15, 8)
+    pdf.cell(170, 7, "AgentGuard  |  AI Security Compliance Report",
+             new_x=XPos.LMARGIN, new_y=YPos.TOP)
+    pdf.set_font("Helvetica", size=8)
+    pdf.set_text_color(180, 200, 220)
+    pdf.set_xy(15, 18)
+    pdf.cell(
+        170, 6,
+        _safe(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  Profile: {profile}"),
+        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+    )
+
+    # Body start
+    pdf.set_xy(15, 36)
+    lines = report_text.split("\n")
+    title = _safe(lines[0]) if lines else ""
+    body_lines = lines[1:] if len(lines) > 1 else []
+
+    # Report title
+    pdf.set_font("Helvetica", style="B", size=12)
+    pdf.set_text_color(20, 30, 60)
+    _mc(pdf, 180, 8, title)
     pdf.ln(2)
+
+    # Separator line
+    pdf.set_draw_color(200, 210, 230)
+    pdf.set_line_width(0.4)
+    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+    pdf.ln(5)
+
+    # Body rows
     pdf.set_font("Courier", size=9)
+    pdf.set_text_color(50, 55, 75)
     for line in body_lines:
-        pdf.multi_cell(0, 5, line)
+        if not line.strip():
+            pdf.ln(3)
+        else:
+            _mc(pdf, 180, 5, _safe(line))
+
+    # Footer
+    pdf.set_y(-16)
+    pdf.set_draw_color(200, 210, 230)
+    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_font("Helvetica", size=7)
+    pdf.set_text_color(150, 155, 175)
+    pdf.cell(180, 5, "CONFIDENTIAL - AgentGuard - For authorized personnel only", align="C")
+
+    return bytes(pdf.output())
+
+
+def make_audit_pdf_bytes(records: list, profile: str) -> bytes:
+    """Generate a landscape audit log PDF table using fpdf2. Returns raw PDF bytes."""
+    from fpdf import FPDF  # lazy import
+    from fpdf.enums import XPos, YPos
+    from datetime import datetime, timezone
+
+    def _safe(s: str) -> str:
+        return str(s).encode("latin-1", "replace").decode("latin-1")
+
+    pdf = FPDF(orientation="L")  # landscape A4
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+
+    # Header strip
+    pdf.set_fill_color(15, 23, 42)
+    pdf.rect(0, 0, 297, 26, "F")
+    pdf.set_font("Helvetica", style="B", size=13)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(15, 7)
+    pdf.cell(260, 8, "AgentGuard  |  Audit Log Export",
+             new_x=XPos.LMARGIN, new_y=YPos.TOP)
+    pdf.set_font("Helvetica", size=8)
+    pdf.set_text_color(180, 200, 220)
+    pdf.set_xy(15, 17)
+    pdf.cell(
+        260, 6,
+        _safe(f"Profile: {profile}  |  Exported: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  {len(records)} records"),
+        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+    )
+
+    pdf.set_xy(15, 32)
+
+    # Columns: TIME(38), AGENT(45), TIER(22), RISK(14), PII(14), DECISION(44), REQUEST(90) = 267
+    col_widths  = [38, 45, 22, 14, 14, 44, 90]
+    col_headers = ["TIMESTAMP", "AGENT", "TIER", "RISK", "PII", "DECISION", "REQUEST SNIPPET"]
+
+    # Table header row
+    pdf.set_fill_color(40, 50, 80)
+    pdf.set_text_color(230, 235, 255)
+    pdf.set_font("Helvetica", style="B", size=7.5)
+    x = 15
+    for header, w in zip(col_headers, col_widths):
+        pdf.set_xy(x, pdf.get_y())
+        pdf.cell(w, 7, header, border=0, fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
+        x += w
+    pdf.ln(7)
+
+    # Decision label map
+    _decision_labels = {
+        "auto":  "Auto-approved",
+        "soft":  "Soft escalation",
+        "hard":  "Hard escalation",
+        "block": "Blocked",
+    }
+
+    # Data rows
+    pdf.set_font("Courier", size=7)
+    fill = False
+    for rec in records[:300]:
+        ts       = _safe((rec.get("timestamp") or "")[:19].replace("T", " "))
+        agent    = _safe((rec.get("agent_id") or "")[:24])
+        tier_raw = (rec.get("tier") or "").lower()
+        tier     = _safe(tier_raw.upper()[:6])
+        risk     = _safe(str(rec.get("risk_score", "")))
+        pii_cnt  = _safe(str(rec.get("pii_entities_detected") or rec.get("entity_count", 0)))
+        decision = _safe(_decision_labels.get(tier_raw, tier_raw.capitalize()))
+        prompt   = _safe((rec.get("prompt") or rec.get("original_prompt") or "")[:65])
+
+        row_vals = [ts, agent, tier, risk, pii_cnt, decision, prompt]
+        bg = (248, 249, 252) if fill else (255, 255, 255)
+        pdf.set_fill_color(*bg)
+
+        x = 15
+        y = pdf.get_y()
+        for j, (val, w) in enumerate(zip(row_vals, col_widths)):
+            pdf.set_xy(x, y)
+            if j == 2:  # tier column — colour by severity
+                if tier_raw == "block":
+                    pdf.set_text_color(210, 50, 50)
+                elif tier_raw in ("soft", "hard"):
+                    pdf.set_text_color(200, 130, 20)
+                else:
+                    pdf.set_text_color(40, 160, 80)
+            elif j == 5:  # decision column — same colour logic
+                if tier_raw == "block":
+                    pdf.set_text_color(210, 50, 50)
+                elif tier_raw in ("soft", "hard"):
+                    pdf.set_text_color(200, 130, 20)
+                else:
+                    pdf.set_text_color(40, 160, 80)
+            else:
+                pdf.set_text_color(50, 55, 75)
+            pdf.cell(w, 5.5, val, border=0, fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
+            x += w
+        pdf.ln(5.5)
+        fill = not fill
+
+    # Footer
+    pdf.set_y(-13)
+    pdf.set_font("Helvetica", size=7)
+    pdf.set_text_color(150, 155, 175)
+    pdf.cell(267, 5, "CONFIDENTIAL - AgentGuard Audit Log - For authorized personnel only", align="C")
+
     return bytes(pdf.output())
 
 
